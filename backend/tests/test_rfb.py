@@ -11,6 +11,7 @@ from backend.main import (
     _rewrite_pointer_event,
     _rewrite_set_encodings,
     _rfb_msg_length,
+    _translate_kasmvnc_clipboard,
     _ALLOWED_ENCODINGS,
 )
 
@@ -109,6 +110,51 @@ def test_parse_clipboard_multiple_mimes():
     buf.extend(struct.pack(">I", len(text)))
     buf.extend(text)
     assert _parse_kasmvnc_clipboard(bytes(buf)) == "world"
+
+
+# ── _translate_kasmvnc_clipboard ─────────────────────────────────────────────
+
+
+def test_translate_clipboard_text_plain():
+    data = _make_kasmvnc_clipboard("text/plain", "hello")
+    handled, payload = _translate_kasmvnc_clipboard(data)
+    assert handled is True
+    assert payload is not None
+    assert payload[0] == 3  # ServerCutText type
+    assert struct.unpack_from(">I", payload, 4)[0] == 5
+    assert payload[8:] == b"hello"
+
+
+def test_translate_clipboard_empty_text():
+    data = _make_kasmvnc_clipboard("text/plain", "")
+    handled, payload = _translate_kasmvnc_clipboard(data)
+    assert handled is True
+    assert payload is not None
+    assert payload[0] == 3
+    assert struct.unpack_from(">I", payload, 4)[0] == 0
+    assert payload[8:] == b""
+
+
+def test_translate_clipboard_non_text_is_handled_without_payload():
+    data = _make_kasmvnc_clipboard("image/png", "binary")
+    handled, payload = _translate_kasmvnc_clipboard(data)
+    assert handled is True
+    assert payload is None
+
+
+def test_translate_invalid_180_chunk_is_not_handled():
+    """Framebuffer chunks may start with 0xb4 and must pass through intact."""
+    data = b"\xb4\x00\x00\x00\x00\x00not-a-kasmvnc-clipboard"
+    handled, payload = _translate_kasmvnc_clipboard(data)
+    assert handled is False
+    assert payload is None
+
+
+def test_translate_trailing_bytes_are_not_valid_clipboard():
+    data = _make_kasmvnc_clipboard("text/plain", "hello") + b"\x00"
+    handled, payload = _translate_kasmvnc_clipboard(data)
+    assert handled is False
+    assert payload is None
 
 
 # ── _build_server_cut_text ───────────────────────────────────────────────────
