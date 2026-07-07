@@ -13,6 +13,16 @@ interface ProfileViewerProps {
 const XK_v = 0x0076;
 type ClipboardActionState = "idle" | "busy" | "success" | "error";
 
+function isClipboardPermissionError(err: unknown) {
+  const name = err instanceof DOMException ? err.name : "";
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    name === "NotAllowedError" ||
+    name === "SecurityError" ||
+    /clipboard read operation is not allowed|permission|denied/i.test(message)
+  );
+}
+
 export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboardSync, onDisconnect }: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<any>(null);
@@ -235,9 +245,17 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
     try {
       let text = "";
       try {
+        if (!navigator.clipboard?.readText) {
+          throw new Error("Clipboard API is not available");
+        }
         text = await navigator.clipboard.readText();
       } catch (err) {
-        console.warn("[clipboard] manual set readText failed:", err);
+        if (isClipboardPermissionError(err)) {
+          console.debug("[clipboard] manual set cancelled or denied:", err);
+          settleClipboardState(setSetClipboardState, "idle");
+          return;
+        }
+        console.warn("[clipboard] manual set readText unavailable:", err);
         const fallback = window.prompt("Paste text to send to CloakBrowser clipboard", "");
         if (fallback === null) {
           settleClipboardState(setSetClipboardState, "idle");
