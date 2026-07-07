@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+import backend.vnc_manager as vnc_manager_module
 from backend.vnc_manager import VNCInstance, VNCManager
 
 
@@ -87,6 +90,34 @@ async def test_active_displays_after_allocate(vnc: VNCManager):
     await vnc.allocate()
     await vnc.allocate()
     assert sorted(vnc.active_displays) == [100, 101]
+
+
+# ── start_vnc ────────────────────────────────────────────────────────────────
+
+
+def test_start_vnc_disables_kasmvnc_clipboard(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, stdout=None, stderr=None):
+        captured["cmd"] = cmd
+        return FakeProcess()
+
+    async def fake_sleep(_seconds: float):
+        return None
+
+    monkeypatch.setattr(vnc_manager_module.shutil, "which", lambda _name: "/usr/bin/Xvnc")
+    monkeypatch.setattr(vnc_manager_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(vnc_manager_module.asyncio, "sleep", fake_sleep)
+
+    manager = VNCManager()
+    asyncio.run(manager.start_vnc(display=100, ws_port=6100))
+
+    assert "-SendCutText=0" in captured["cmd"]
+    assert "-AcceptCutText=0" in captured["cmd"]
 
 
 # ── BrowserManager.get_status ────────────────────────────────────────────────

@@ -146,8 +146,9 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
     return () => container.removeEventListener("keydown", handleKeyDown, true);
   }, [profileId, clipboardSync, connected]);
 
-  // VNC→Host: listen for noVNC "clipboard" event (fired when proxy converts
-  // KasmVNC BinaryClipboard type 180 → standard ServerCutText type 3)
+  // VNC→Host: keep a best-effort listener for standard noVNC clipboard
+  // events. KasmVNC CutText transport is disabled server-side to prevent
+  // private BinaryClipboard type 180 messages from reaching noVNC.
   useEffect(() => {
     const rfb = rfbRef.current;
     console.log("[clipboard] VNC→Host effect: rfb=", !!rfb, "sync=", clipboardSync, "connected=", connected);
@@ -173,8 +174,8 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
     };
   }, [clipboardSync, connected]);
 
-  // VNC→Host polling: Chrome doesn't write to X11 clipboard under KasmVNC,
-  // so type 180 events won't fire for Chrome copies. Poll via Playwright CDP.
+  // VNC→Host polling: Chrome doesn't write to X11 clipboard under KasmVNC.
+  // Poll via Playwright CDP instead of relying on KasmVNC clipboard messages.
   useEffect(() => {
     if (!clipboardSync || !connected) return;
 

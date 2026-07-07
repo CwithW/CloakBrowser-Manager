@@ -61,6 +61,11 @@ class VNCManager:
             "-DisableBasicAuth",
             "-interface", "127.0.0.1",  # internal only, proxied by FastAPI
             "-AlwaysShared",
+            # Disable KasmVNC clipboard transport so private BinaryClipboard
+            # server messages (type 180) never reach noVNC. Clipboard sync is
+            # handled through the manager API instead.
+            "-SendCutText=0",
+            "-AcceptCutText=0",
             "-httpd", httpd_dir,
         ]
 

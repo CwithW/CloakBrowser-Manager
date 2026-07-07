@@ -5,13 +5,10 @@ from __future__ import annotations
 import struct
 
 from backend.main import (
-    _build_server_cut_text,
     _filter_rfb_client_messages,
-    _parse_kasmvnc_clipboard,
     _rewrite_pointer_event,
     _rewrite_set_encodings,
     _rfb_msg_length,
-    _translate_kasmvnc_clipboard,
     _ALLOWED_ENCODINGS,
 )
 
@@ -51,137 +48,6 @@ def _make_client_cut_text(text: str) -> bytes:
 def _make_extension_150() -> bytes:
     """Build a 10-byte EnableContinuousUpdates extension (type 150)."""
     return struct.pack(">BBHHHH", 150, 1, 0, 0, 1920, 1080)
-
-
-def _make_kasmvnc_clipboard(mime: str, data: str) -> bytes:
-    """Build a KasmVNC BinaryClipboard message (type 180)."""
-    mime_bytes = mime.encode()
-    data_bytes = data.encode("utf-8")
-    buf = bytearray()
-    buf.append(180)       # type
-    buf.append(0)         # action
-    buf.extend(b'\x00' * 4)  # flags
-    buf.append(len(mime_bytes))  # mime_len (u8)
-    buf.extend(mime_bytes)
-    buf.extend(struct.pack(">I", len(data_bytes)))  # data_len (u32 BE)
-    buf.extend(data_bytes)
-    return bytes(buf)
-
-
-# ── _parse_kasmvnc_clipboard ────────────────────────────────────────────────
-
-
-def test_parse_clipboard_text_plain():
-    data = _make_kasmvnc_clipboard("text/plain", "hello")
-    assert _parse_kasmvnc_clipboard(data) == "hello"
-
-
-def test_parse_clipboard_no_text_plain():
-    data = _make_kasmvnc_clipboard("image/png", "binary")
-    assert _parse_kasmvnc_clipboard(data) is None
-
-
-def test_parse_clipboard_too_short():
-    assert _parse_kasmvnc_clipboard(b"\xb4\x00\x00") is None
-
-
-def test_parse_clipboard_empty_text():
-    data = _make_kasmvnc_clipboard("text/plain", "")
-    assert _parse_kasmvnc_clipboard(data) == ""
-
-
-def test_parse_clipboard_multiple_mimes():
-    """First mime is image/png, second is text/plain — should find text/plain."""
-    buf = bytearray()
-    buf.append(180)
-    buf.append(0)
-    buf.extend(b'\x00' * 4)
-    # Entry 1: image/png
-    mime1 = b"image/png"
-    buf.append(len(mime1))
-    buf.extend(mime1)
-    buf.extend(struct.pack(">I", 3))
-    buf.extend(b"PNG")
-    # Entry 2: text/plain
-    mime2 = b"text/plain"
-    buf.append(len(mime2))
-    buf.extend(mime2)
-    text = b"world"
-    buf.extend(struct.pack(">I", len(text)))
-    buf.extend(text)
-    assert _parse_kasmvnc_clipboard(bytes(buf)) == "world"
-
-
-# ── _translate_kasmvnc_clipboard ─────────────────────────────────────────────
-
-
-def test_translate_clipboard_text_plain():
-    data = _make_kasmvnc_clipboard("text/plain", "hello")
-    handled, payload = _translate_kasmvnc_clipboard(data)
-    assert handled is True
-    assert payload is not None
-    assert payload[0] == 3  # ServerCutText type
-    assert struct.unpack_from(">I", payload, 4)[0] == 5
-    assert payload[8:] == b"hello"
-
-
-def test_translate_clipboard_empty_text():
-    data = _make_kasmvnc_clipboard("text/plain", "")
-    handled, payload = _translate_kasmvnc_clipboard(data)
-    assert handled is True
-    assert payload is not None
-    assert payload[0] == 3
-    assert struct.unpack_from(">I", payload, 4)[0] == 0
-    assert payload[8:] == b""
-
-
-def test_translate_clipboard_non_text_is_handled_without_payload():
-    data = _make_kasmvnc_clipboard("image/png", "binary")
-    handled, payload = _translate_kasmvnc_clipboard(data)
-    assert handled is True
-    assert payload is None
-
-
-def test_translate_invalid_180_chunk_is_not_handled():
-    """Framebuffer chunks may start with 0xb4 and must pass through intact."""
-    data = b"\xb4\x00\x00\x00\x00\x00not-a-kasmvnc-clipboard"
-    handled, payload = _translate_kasmvnc_clipboard(data)
-    assert handled is False
-    assert payload is None
-
-
-def test_translate_trailing_bytes_are_not_valid_clipboard():
-    data = _make_kasmvnc_clipboard("text/plain", "hello") + b"\x00"
-    handled, payload = _translate_kasmvnc_clipboard(data)
-    assert handled is False
-    assert payload is None
-
-
-# ── _build_server_cut_text ───────────────────────────────────────────────────
-
-
-def test_build_cut_text_basic():
-    result = _build_server_cut_text("hi")
-    assert result[0] == 3  # ServerCutText type
-    length = struct.unpack_from(">I", result, 4)[0]
-    assert length == 2
-    assert result[8:] == b"hi"
-
-
-def test_build_cut_text_empty():
-    result = _build_server_cut_text("")
-    assert result[0] == 3
-    length = struct.unpack_from(">I", result, 4)[0]
-    assert length == 0
-    assert len(result) == 8
-
-
-def test_build_cut_text_latin1_fallback():
-    # CJK chars are outside Latin-1 — replaced with '?'
-    result = _build_server_cut_text("hello \u65e5\u672c")
-    text_bytes = result[8:]
-    assert b"?" in text_bytes  # unicode replaced
-    assert text_bytes.startswith(b"hello ")
 
 
 # ── _rfb_msg_length ─────────────────────────────────────────────────────────

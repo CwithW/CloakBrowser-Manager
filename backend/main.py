@@ -181,108 +181,6 @@ FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 
 
 # ---------------------------------------------------------------------------
-# RFB server message translator — KasmVNC BinaryClipboard → standard RFB
-# ---------------------------------------------------------------------------
-
-_KASMVNC_BINARY_CLIPBOARD_TYPE = 180
-_KASMVNC_CLIPBOARD_INVALID = "invalid"
-_KASMVNC_CLIPBOARD_TEXT = "text"
-_KASMVNC_CLIPBOARD_NON_TEXT = "non_text"
-
-
-def _is_valid_clipboard_mime_type(mime_type: bytes) -> bool:
-    """Return True for simple printable MIME types, e.g. text/plain."""
-    return b"/" in mime_type and all(33 <= ch <= 126 for ch in mime_type)
-
-
-def _classify_kasmvnc_clipboard(data: bytes) -> tuple[str, str | None]:
-    """Strictly classify a complete KasmVNC BinaryClipboard message.
-
-    Returns (kind, text), where kind is one of:
-    - _KASMVNC_CLIPBOARD_TEXT: valid text/plain clipboard, text may be empty
-    - _KASMVNC_CLIPBOARD_NON_TEXT: valid clipboard without text/plain
-    - _KASMVNC_CLIPBOARD_INVALID: not a complete valid BinaryClipboard message
-    """
-    if not data or data[0] != _KASMVNC_BINARY_CLIPBOARD_TYPE:
-        return _KASMVNC_CLIPBOARD_INVALID, None
-    if len(data) < 7:
-        return _KASMVNC_CLIPBOARD_INVALID, None
-
-    offset = 6  # skip type(1) + action(1) + flags(4)
-    text: str | None = None
-    entries = 0
-
-    while offset < len(data):
-        if offset + 1 > len(data):
-            return _KASMVNC_CLIPBOARD_INVALID, None
-
-        mime_len = data[offset]
-        offset += 1
-        if mime_len == 0 or offset + mime_len > len(data):
-            return _KASMVNC_CLIPBOARD_INVALID, None
-
-        mime_type = data[offset:offset + mime_len]
-        offset += mime_len
-        if not _is_valid_clipboard_mime_type(mime_type):
-            return _KASMVNC_CLIPBOARD_INVALID, None
-
-        if offset + 4 > len(data):
-            return _KASMVNC_CLIPBOARD_INVALID, None
-
-        data_len = struct.unpack_from(">I", data, offset)[0]
-        offset += 4
-        if offset + data_len > len(data):
-            return _KASMVNC_CLIPBOARD_INVALID, None
-
-        payload = data[offset:offset + data_len]
-        offset += data_len
-        entries += 1
-
-        if mime_type == b"text/plain":
-            text = payload.decode("utf-8", errors="replace")
-
-    if entries == 0:
-        return _KASMVNC_CLIPBOARD_INVALID, None
-    if text is not None:
-        return _KASMVNC_CLIPBOARD_TEXT, text
-    return _KASMVNC_CLIPBOARD_NON_TEXT, None
-
-
-def _translate_kasmvnc_clipboard(data: bytes) -> tuple[bool, bytes | None]:
-    """Translate valid KasmVNC clipboard messages to standard ServerCutText.
-
-    Returns (handled, payload). handled=True with payload=None means the message
-    was a valid non-text clipboard payload that noVNC cannot consume.
-    """
-    kind, text = _classify_kasmvnc_clipboard(data)
-    if kind == _KASMVNC_CLIPBOARD_TEXT:
-        return True, _build_server_cut_text(text or "")
-    if kind == _KASMVNC_CLIPBOARD_NON_TEXT:
-        return True, None
-    return False, None
-
-
-def _parse_kasmvnc_clipboard(data: bytes) -> str | None:
-    """Extract text/plain from KasmVNC BinaryClipboard (type 180).
-
-    Format: type(1) + action(1) + flags(4) + entries...
-    Each entry: mime_len(u8) + mime(N) + data_len(u32 BE) + data(M)
-    """
-    kind, text = _classify_kasmvnc_clipboard(data)
-    return text if kind == _KASMVNC_CLIPBOARD_TEXT else None
-
-
-def _build_server_cut_text(text: str) -> bytes:
-    """Build standard RFB ServerCutText (type 3) message.
-
-    RFB spec mandates Latin-1 encoding for ServerCutText.
-    Characters outside Latin-1 (CJK, emoji, etc.) are replaced with '?'.
-    """
-    text_bytes = text.encode("latin-1", errors="replace")
-    return struct.pack(">BxxxI", 3, len(text_bytes)) + text_bytes
-
-
-# ---------------------------------------------------------------------------
 # RFB client message filter — strip extension types KasmVNC doesn't support
 # ---------------------------------------------------------------------------
 # noVNC v1.4 batches multiple RFB messages into one WebSocket frame.
@@ -833,23 +731,6 @@ async def vnc_proxy(websocket: WebSocket, profile_id: str):
                     async for msg in vnc_ws:
                         count += 1
                         if isinstance(msg, bytes) and len(msg) > 0:
-                            # KasmVNC may emit non-standard BinaryClipboard
-                            # server messages (type 180), while noVNC only
-                            # understands standard ServerCutText (type 3).
-                            # WebSocket frames are transport chunks, not RFB
-                            # message boundaries, so msg[0] == 180 is only a
-                            # candidate. Strict validation prevents arbitrary
-                            # framebuffer payload chunks that start with 0xb4
-                            # from being dropped and desynchronizing noVNC.
-                            handled, translated = _translate_kasmvnc_clipboard(msg)
-                            if handled:
-                                if translated is not None:
-                                    length = struct.unpack_from(">I", translated, 4)[0]
-                                    logger.info("VNC proxy [v->c]: clipboard %d chars", length)
-                                    await websocket.send_bytes(translated)
-                                else:
-                                    logger.info("VNC proxy [v->c]: dropped non-text KasmVNC clipboard")
-                                continue
                             await websocket.send_bytes(msg)
                         elif isinstance(msg, bytes):
                             await websocket.send_bytes(msg)
