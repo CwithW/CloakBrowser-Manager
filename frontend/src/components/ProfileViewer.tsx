@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ClipboardCopy, Code2, Maximize2, Minimize2 } from "lucide-react";
+import { ClipboardCopy, Code2, Download, Maximize2, Minimize2, Upload } from "lucide-react";
 import { api } from "../lib/api";
 
 interface ProfileViewerProps {
@@ -11,6 +11,7 @@ interface ProfileViewerProps {
 
 // X11 keysym for V key (Ctrl is already held in VNC by the time we intercept)
 const XK_v = 0x0076;
+type ClipboardActionState = "idle" | "busy" | "success" | "error";
 
 export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboardSync, onDisconnect }: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -20,6 +21,8 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
   const [fullscreen, setFullscreen] = useState(false);
   const [clipboardSync, setClipboardSync] = useState(initialClipboardSync);
   const [cdpCopied, setCdpCopied] = useState(false);
+  const [setClipboardState, setSetClipboardState] = useState<ClipboardActionState>("idle");
+  const [readClipboardState, setReadClipboardState] = useState<ClipboardActionState>("idle");
 
   useEffect(() => {
     let rfb: any = null;
@@ -208,6 +211,71 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
     }
   };
 
+  const settleClipboardState = (
+    setter: (state: ClipboardActionState) => void,
+    state: ClipboardActionState,
+  ) => {
+    setter(state);
+    if (state !== "busy") {
+      window.setTimeout(() => setter("idle"), 2000);
+    }
+  };
+
+  const clipboardActionClass = (state: ClipboardActionState) => {
+    const tone = state === "success"
+      ? "text-emerald-400"
+      : state === "error"
+        ? "text-red-400"
+        : "text-gray-500 hover:text-gray-300";
+    return `p-1 disabled:cursor-not-allowed disabled:opacity-40 ${state === "busy" ? "animate-pulse" : ""} ${tone}`;
+  };
+
+  const handleSetClipboard = async () => {
+    settleClipboardState(setSetClipboardState, "busy");
+    try {
+      let text = "";
+      try {
+        text = await navigator.clipboard.readText();
+      } catch (err) {
+        console.warn("[clipboard] manual set readText failed:", err);
+        const fallback = window.prompt("Paste text to send to CloakBrowser clipboard", "");
+        if (fallback === null) {
+          settleClipboardState(setSetClipboardState, "idle");
+          return;
+        }
+        text = fallback;
+      }
+
+      await api.setClipboard(profileId, text);
+      try {
+        rfbRef.current?.clipboardPasteFrom?.(text);
+      } catch (err) {
+        console.warn("[clipboard] noVNC clipboardPasteFrom failed:", err);
+      }
+      settleClipboardState(setSetClipboardState, "success");
+    } catch (err) {
+      console.warn("[clipboard] manual set failed:", err);
+      settleClipboardState(setSetClipboardState, "error");
+    }
+  };
+
+  const handleReadClipboard = async () => {
+    settleClipboardState(setReadClipboardState, "busy");
+    try {
+      const { text } = await api.getClipboard(profileId);
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (err) {
+        console.warn("[clipboard] manual read writeText failed:", err);
+        window.prompt("Copy CloakBrowser clipboard text", text);
+      }
+      settleClipboardState(setReadClipboardState, "success");
+    } catch (err) {
+      console.warn("[clipboard] manual read failed:", err);
+      settleClipboardState(setReadClipboardState, "error");
+    }
+  };
+
   useEffect(() => {
     const handleFsChange = () => {
       setFullscreen(!!document.fullscreenElement);
@@ -250,6 +318,22 @@ export function ProfileViewer({ profileId, cdpUrl, clipboardSync: initialClipboa
           </span>
         </div>
         <div className="flex items-center gap-1">
+          <button
+            onClick={handleSetClipboard}
+            className={clipboardActionClass(setClipboardState)}
+            title="Set Clipboard (frontend → CloakBrowser)"
+            disabled={!connected || setClipboardState === "busy"}
+          >
+            <Upload className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={handleReadClipboard}
+            className={clipboardActionClass(readClipboardState)}
+            title="Read Clipboard (CloakBrowser → frontend)"
+            disabled={!connected || readClipboardState === "busy"}
+          >
+            <Download className="h-3.5 w-3.5" />
+          </button>
           {cdpUrl && (
             <button
               onClick={() => {

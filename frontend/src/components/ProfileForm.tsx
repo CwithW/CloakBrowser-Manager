@@ -52,23 +52,25 @@ const GPU_PRESETS: Record<string, { vendor: string; renderer: string }> = {
   },
 };
 
+const DEFAULT_FORM: ProfileCreateData = {
+  name: "",
+  platform: "windows",
+  screen_width: 1920,
+  screen_height: 1080,
+  humanize: false,
+  human_preset: "default",
+  headless: false,
+  geoip: false,
+  clipboard_sync: false,
+  auto_launch: false,
+  launch_args: [],
+  tags: [],
+};
+
 export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileFormProps) {
   const isEdit = profile !== null;
 
-  const [form, setForm] = useState<ProfileCreateData>({
-    name: "",
-    platform: "windows",
-    screen_width: 1920,
-    screen_height: 1080,
-    humanize: false,
-    human_preset: "default",
-    headless: false,
-    geoip: false,
-    clipboard_sync: true,
-    auto_launch: false,
-    launch_args: [],
-    tags: [],
-  });
+  const [form, setForm] = useState<ProfileCreateData>(DEFAULT_FORM);
 
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -77,32 +79,30 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
   const [launchArgInput, setLaunchArgInput] = useState("");
 
   useEffect(() => {
-    if (profile) {
-      setForm({
-        name: profile.name,
-        fingerprint_seed: profile.fingerprint_seed,
-        proxy: profile.proxy,
-        timezone: profile.timezone,
-        locale: profile.locale,
-        platform: profile.platform,
-        user_agent: profile.user_agent,
-        screen_width: profile.screen_width,
-        screen_height: profile.screen_height,
-        gpu_vendor: profile.gpu_vendor,
-        gpu_renderer: profile.gpu_renderer,
-        hardware_concurrency: profile.hardware_concurrency,
-        humanize: profile.humanize,
-        human_preset: profile.human_preset,
-        headless: profile.headless,
-        geoip: profile.geoip,
-        clipboard_sync: profile.clipboard_sync,
-        auto_launch: profile.auto_launch,
-        color_scheme: profile.color_scheme,
-        launch_args: profile.launch_args ?? [],
-        notes: profile.notes,
-        tags: profile.tags ?? [],
-      });
-    }
+    setForm(profile ? {
+      name: profile.name,
+      fingerprint_seed: profile.fingerprint_seed,
+      proxy: profile.proxy,
+      timezone: profile.timezone,
+      locale: profile.locale,
+      platform: profile.platform,
+      user_agent: profile.user_agent,
+      screen_width: profile.screen_width,
+      screen_height: profile.screen_height,
+      gpu_vendor: profile.gpu_vendor,
+      gpu_renderer: profile.gpu_renderer,
+      hardware_concurrency: profile.hardware_concurrency,
+      humanize: profile.humanize,
+      human_preset: profile.human_preset,
+      headless: profile.headless,
+      geoip: profile.geoip,
+      clipboard_sync: profile.clipboard_sync,
+      auto_launch: profile.auto_launch,
+      color_scheme: profile.color_scheme,
+      launch_args: profile.launch_args ?? [],
+      notes: profile.notes,
+      tags: profile.tags ?? [],
+    } : DEFAULT_FORM);
   }, [profile?.id]);
 
   const set = <K extends keyof ProfileCreateData>(key: K, value: ProfileCreateData[K]) => {
@@ -439,7 +439,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
             <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
               <input
                 type="checkbox"
-                checked={form.clipboard_sync ?? true}
+                checked={form.clipboard_sync ?? false}
                 onChange={(e) => set("clipboard_sync", e.target.checked)}
                 className="rounded border-border bg-surface-2"
               />
