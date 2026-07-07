@@ -45,14 +45,15 @@ WORKDIR /app
 COPY backend/requirements.txt /app/backend/
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
+# Pre-download CloakBrowser binary. This only depends on the installed
+# cloakbrowser package, so keep it before application code copies.
+RUN python -c "from cloakbrowser.download import ensure_binary; ensure_binary()"
+
 # Backend code
 COPY backend/ /app/backend/
 
 # Frontend build from stage 1
 COPY --from=frontend-builder /build/dist /app/frontend/dist
-
-# Pre-download CloakBrowser binary
-RUN python -c "from cloakbrowser.download import ensure_binary; ensure_binary()"
 
 EXPOSE 8080
 
