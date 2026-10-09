@@ -10,6 +10,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from .webrtc import default_mode
 
 DATA_DIR = Path("/data")
 DB_PATH = DATA_DIR / "profiles.db"
@@ -84,6 +85,9 @@ def init_db():
             ("keepassxc_enabled", "BOOLEAN"),
             ("firefox_preferences", "TEXT NOT NULL DEFAULT '{}'"),
             ("camoufox_config", "TEXT NOT NULL DEFAULT '{}'"),
+            ("webrtc_mode", "TEXT NOT NULL DEFAULT 'enabled'"),
+            ("remote_debugging_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("playwright_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
         ):
             if name not in cols:
                 conn.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
@@ -113,8 +117,9 @@ def create_profile(
                 hardware_concurrency, humanize, human_preset, headless, geoip,
                 clipboard_sync, auto_launch, color_scheme, launch_args, notes,
                 user_data_dir, created_at, updated_at, browser_type, use_gpu,
-                keepassxc_enabled, firefox_preferences, camoufox_config
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                keepassxc_enabled, firefox_preferences, camoufox_config, webrtc_mode,
+                remote_debugging_enabled, playwright_enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 profile_id, name, seed,
                 fields.get("proxy"),
@@ -142,6 +147,9 @@ def create_profile(
                 fields.get("keepassxc_enabled", True if fields.get("browser_type", "cloakbrowser") != "cloakbrowser" else None),
                 json.dumps(fields.get("firefox_preferences") or {}),
                 json.dumps(fields.get("camoufox_config") or {}),
+                fields.get("webrtc_mode", default_mode(fields.get("browser_type", "cloakbrowser"))),
+                fields.get("remote_debugging_enabled", False),
+                fields.get("playwright_enabled", False),
             ),
         )
         for t in tags:
@@ -214,6 +222,7 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
         "hardware_concurrency", "humanize", "human_preset", "headless", "geoip",
         "clipboard_sync", "auto_launch", "color_scheme", "launch_args", "notes",
         "use_gpu", "keepassxc_enabled", "firefox_preferences", "camoufox_config",
+        "webrtc_mode", "remote_debugging_enabled", "playwright_enabled",
     ):
         if col in fields:
             update_cols.append(f"{col} = ?")

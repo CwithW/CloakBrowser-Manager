@@ -3,11 +3,15 @@
  */
 
 export type BrowserType = "cloakbrowser" | "chromium" | "firefox" | "camoufox";
+export type WebRTCMode = "disabled" | "protect_ip" | "enabled";
 
 export interface Profile {
   id: string;
   name: string;
   browser_type: BrowserType;
+  webrtc_mode: WebRTCMode;
+  remote_debugging_enabled: boolean;
+  playwright_enabled: boolean;
   use_gpu: boolean;
   keepassxc_enabled: boolean | null;
   firefox_preferences: Record<string, boolean | number | string>;
@@ -39,11 +43,16 @@ export interface Profile {
   status: "running" | "stopped";
   vnc_ws_port: number | null;
   cdp_url: string | null;
+  bidi_url: string | null;
+  playwright_url: string | null;
 }
 
 export interface ProfileCreateData {
   name: string;
   browser_type?: BrowserType;
+  webrtc_mode?: WebRTCMode;
+  remote_debugging_enabled?: boolean;
+  playwright_enabled?: boolean;
   use_gpu?: boolean;
   keepassxc_enabled?: boolean | null;
   firefox_preferences?: Record<string, boolean | number | string>;
@@ -77,6 +86,8 @@ export interface LaunchResult {
   vnc_ws_port: number;
   display: string;
   cdp_url: string | null;
+  bidi_url: string | null;
+  playwright_url: string | null;
 }
 
 export interface SystemStatus {

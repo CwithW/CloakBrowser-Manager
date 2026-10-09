@@ -81,8 +81,8 @@ RUN sed -i \
     libglib2.0-0 libgtk-3-0 libpangocairo-1.0-0 libcairo-gobject2 \
     libgdk-pixbuf-2.0-0 libxss1 libxtst6 fonts-liberation \
     libgl1 libgl1-mesa-dri libegl-mesa0 \
-    procps wget ca-certificates xclip xdotool libgpg-error0 libusb-1.0-0 \
-    chromium firefox-esr tzdata mesa-va-drivers mesa-vulkan-drivers \
+    procps wget curl ca-certificates xclip xdotool libgpg-error0 libusb-1.0-0 \
+    tzdata mesa-va-drivers mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
 
 # Install the checksum-pinned official runtime. Small stable wrappers preserve
@@ -138,14 +138,24 @@ WORKDIR /app
 COPY backend/requirements.txt /app/backend/
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
+# Browser pins live in every release commit. Never resolve latest in a build.
+COPY docker/browser-versions.json docker/install_browsers.py /opt/cbm/
+RUN python /opt/cbm/install_browsers.py native \
+    && rm -rf /var/lib/apt/lists/*
+
 # Pre-download CloakBrowser binary. This only depends on the installed
 # cloakbrowser package, so keep it before application code copies.
-RUN python -c "from cloakbrowser.download import ensure_binary; ensure_binary()"
+RUN --mount=type=cache,target=/root/.cloakbrowser,sharing=locked \
+    python /opt/cbm/install_browsers.py cloakbrowser
 
 # Download Camoufox and its default addon/GeoIP assets during the build, so
 # launching a profile never needs to download a browser binary at runtime.
-RUN python -m camoufox fetch \
-    && python -c "from camoufox.utils import launch_options; launch_options(headless=True, geoip=False)"
+RUN --mount=type=cache,target=/var/cache/cbm-browsers,sharing=locked \
+    python /opt/cbm/install_browsers.py camoufox \
+    && python /opt/cbm/install_browsers.py verify
+
+ENV CLOAKBROWSER_BINARY_PATH=/opt/cbm/cloakbrowser/chrome \
+    CLOAKBROWSER_AUTO_UPDATE=false
 
 # Backend code
 COPY backend/ /app/backend/
@@ -164,3 +174,8 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
+
+ARG GIT_COMMIT=unknown
+ARG RELEASE_VERSION=development
+LABEL org.opencontainers.image.revision=$GIT_COMMIT \
+    org.opencontainers.image.version=$RELEASE_VERSION

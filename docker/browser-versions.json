@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "platform": "linux/amd64",
+  "chromium": {
+    "package": "chromium",
+    "version": "154.0.8037.92-1~deb13u1"
+  },
+  "firefox": {
+    "package": "firefox-esr",
+    "version": "153.4.0esr-1~deb13u1"
+  },
+  "camoufox": {
+    "python_version": "0.5.8",
+    "version": "156.0.1",
+    "release": "beta.36",
+    "url": "https://github.com/daijro/camoufox/releases/download/v156.0.1-beta.36/camoufox-156.0.1-beta.36-lin.x86_64.zip",
+    "sha256": "72637885ee67c93466ad377831c647192f8f08fb5c6fd9279de1320b49dd2b53"
+  },
+  "cloakbrowser": {
+    "python_version": "0.6.0",
+    "version": "146.0.7680.177.5",
+    "tier": "free"
+  }
+}

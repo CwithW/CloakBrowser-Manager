@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import signal
 import sys
@@ -18,6 +19,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 
 from .profile_files import profile_home
+from .webrtc import chromium_policy, firefox_policy
 
 CHROMIUM_EXTENSION = Path("/opt/cloakbrowser/extensions/keepassxc-browser")
 FIREFOX_EXTENSION_XPI = Path("/opt/cloakbrowser/extensions/keepassxc-browser-firefox.xpi")
@@ -72,6 +74,10 @@ def firefox_preferences(profile: dict[str, Any], proxy: str | None) -> dict[str,
         "browser.startup.page": 0,
         "browser.warnOnQuit": False,
         "browser.tabs.warnOnClose": False,
+        "app.update.auto": False,
+        "app.update.enabled": False,
+        "app.update.background.scheduling.enabled": False,
+        "app.update.disabledForTesting": True,
         "browser.sessionstore.resume_from_crash": True,
         "extensions.autoDisableScopes": 0,
         "extensions.enabledScopes": 15,
@@ -105,6 +111,9 @@ def firefox_preferences(profile: dict[str, Any], proxy: str | None) -> dict[str,
     if gpu_available(profile):
         prefs["gfx.webrender.all"] = True
         prefs["media.ffmpeg.vaapi.enabled"] = True
+    prefs.update(firefox_policy(profile))
+    if profile.get("remote_debugging_port"):
+        prefs["remote.active-protocols"] = 1  # BiDi only, including older Camoufox
     prefs.update(profile.get("firefox_preferences") or {})
     if proxy:
         parsed = urlsplit(proxy)
@@ -195,30 +204,15 @@ def native_command(profile: dict[str, Any], proxy: str | None, keepassxc: bool) 
     directory.mkdir(parents=True, exist_ok=True)
     width, height = profile.get("screen_width", 1920), profile.get("screen_height", 1080)
     args = profile.get("launch_args") or []
-    # Native profiles have no automation/debugging endpoint, including custom flags.
+    # Debugging flags belong to the explicit toggle and assigned port.
     forbidden = ("--remote-debugging", "--enable-automation", "--test-type", "--marionette", "-marionette", "--juggler", "-juggler", "--start-debugger-server", "-start-debugger-server", "--headless", "-headless")
     if profile.get("headless") or any(arg.startswith(forbidden) for arg in args):
-        raise ValueError("Native browsers require normal windowed launch without headless, automation or remote-debugging arguments.")
+        raise ValueError("Native browsers require windowed launch without automation arguments; use the debugging toggle for remote access.")
     if profile["browser_type"] == "firefox":
-        prefs = firefox_preferences(profile, proxy)
-        extensions = directory / "extensions"
-        extensions.mkdir(exist_ok=True)
-        _install_firefox_keepassxc(directory, keepassxc)
-        proxy_addon = extensions / f"{PROXY_ADDON_ID}.xpi"
-        if proxy and urlsplit(proxy).username is not None:
-            auth_dir = _proxy_auth_extension(Path(profile["runtime_dir"]) / "proxy-auth", proxy, firefox=True)
-            with zipfile.ZipFile(proxy_addon, "w", zipfile.ZIP_DEFLATED) as archive:
-                for path in auth_dir.iterdir():
-                    archive.write(path, path.name)
-            proxy_addon.chmod(0o600)
-            # ESR supports unsigned local extensions without enabling automation.
-            prefs["xpinstall.signatures.required"] = False
-        else:
-            proxy_addon.unlink(missing_ok=True)
-        _write_firefox_preferences(directory, prefs)
+        _prepare_firefox_profile(profile, proxy, keepassxc)
         command = ["/usr/bin/firefox-esr", "--no-remote", "--new-instance", "--profile", str(directory), "--width", str(width), "--height", str(height)]
     else:
-        command = ["/usr/bin/chromium", f"--user-data-dir={directory}", "--no-sandbox", "--no-first-run", "--no-default-browser-check", "--disable-background-mode", f"--window-size={width},{height}"]
+        command = ["/usr/bin/chromium", f"--user-data-dir={directory}", "--no-sandbox", "--no-first-run", "--no-default-browser-check", "--disable-background-mode", "--disable-component-update", f"--window-size={width},{height}"]
         if not gpu_available(profile):
             command.append("--use-angle=swiftshader")
         else:
@@ -232,6 +226,7 @@ def native_command(profile: dict[str, Any], proxy: str | None, keepassxc: bool) 
             data.setdefault("intl", {})["accept_languages"] = profile["locale"]
         else:
             data.get("intl", {}).pop("accept_languages", None)
+        webrtc_extension = chromium_policy(profile, data)
         preferences.parent.mkdir(exist_ok=True)
         preferences.write_text(json.dumps(data))
         if profile.get("user_agent"):
@@ -239,6 +234,8 @@ def native_command(profile: dict[str, Any], proxy: str | None, keepassxc: bool) 
         if profile.get("color_scheme") == "dark":
             command.append("--force-dark-mode")
         extensions_to_load = [str(CHROMIUM_EXTENSION)] if keepassxc else []
+        if webrtc_extension:
+            extensions_to_load.append(str(webrtc_extension))
         if proxy:
             parsed_proxy = playwright_proxy(proxy)
             command.append(f"--proxy-server={parsed_proxy['server']}")
@@ -257,7 +254,28 @@ def native_command(profile: dict[str, Any], proxy: str | None, keepassxc: bool) 
         if extensions_to_load:
             paths = ",".join(dict.fromkeys(extensions_to_load))
             command.extend([f"--load-extension={paths}", f"--disable-extensions-except={paths}"])
+    if profile.get("remote_debugging_port"):
+        command.append(f"--remote-debugging-port={profile['remote_debugging_port']}")
     return command + args
+
+
+def _prepare_firefox_profile(profile: dict[str, Any], proxy: str | None, keepassxc: bool, extra_prefs: dict[str, Any] | None = None) -> None:
+    directory = Path(profile["user_data_dir"])
+    prefs = {**(extra_prefs or {}), **firefox_preferences(profile, proxy)}
+    extensions = directory / "extensions"
+    extensions.mkdir(parents=True, exist_ok=True)
+    _install_firefox_keepassxc(directory, keepassxc)
+    proxy_addon = extensions / f"{PROXY_ADDON_ID}.xpi"
+    if proxy and urlsplit(proxy).username is not None:
+        auth_dir = _proxy_auth_extension(Path(profile["runtime_dir"]) / "proxy-auth", proxy, firefox=True)
+        with zipfile.ZipFile(proxy_addon, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in auth_dir.iterdir():
+                archive.write(path, path.name)
+        proxy_addon.chmod(0o600)
+        prefs["xpinstall.signatures.required"] = False
+    else:
+        proxy_addon.unlink(missing_ok=True)
+    _write_firefox_preferences(directory, prefs)
 
 
 def _install_firefox_keepassxc(directory: Path, enabled: bool) -> None:
@@ -351,7 +369,7 @@ class NativeBrowserContext:
         if self.process.returncode is None:
             try:
                 search_args = ["xdotool", "search", "--all", "--pid", str(self.process.pid)]
-                if self._browser_type == "firefox":
+                if self._browser_type in {"firefox", "camoufox"}:
                     # Firefox also owns an invisible application window. Only
                     # its Navigator windows represent closable browser windows.
                     search_args.extend(["--classname", "Navigator"])
@@ -392,7 +410,40 @@ class NativeBrowserContext:
 
 
 async def launch_native(profile: dict[str, Any], proxy: str | None, env: dict[str, str], keepassxc: bool) -> NativeBrowserContext:
+    # Unpacked content scripts are registered asynchronously. Hold initial URLs
+    # until the ordinary extension confirms registration, without CDP/WebDriver.
+    server = None
+    ready = asyncio.Event()
+    token = secrets.token_urlsafe(24)
+    guarded = profile["browser_type"] == "chromium" and profile.get("webrtc_mode") == "disabled" and "--disable-extensions" not in (profile.get("launch_args") or [])
+    if guarded:
+        async def acknowledge(reader, writer):
+            try:
+                request = await asyncio.wait_for(reader.readline(), timeout=2)
+                if request == f"POST /{token} HTTP/1.1\r\n".encode():
+                    ready.set()
+                    writer.write(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        server = await asyncio.start_server(acknowledge, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        profile = {**profile, "webrtc_ready_url": f"http://127.0.0.1:{port}/{token}"}
+    try:
+        return await _spawn_native(profile, proxy, env, keepassxc, ready if guarded else None)
+    finally:
+        if server:
+            server.close()
+            await server.wait_closed()
+
+
+async def _spawn_native(profile: dict[str, Any], proxy: str | None, env: dict[str, str], keepassxc: bool, ready: asyncio.Event | None) -> NativeBrowserContext:
     command = native_command(profile, proxy, keepassxc)
+    urls = []
+    if ready is not None:
+        urls = [arg for arg in command[1:] if urlsplit(arg).scheme in {"http", "https", "file", "about", "chrome", "chrome-extension", "data", "blob"}]
+        command = [arg for arg in command if arg not in urls] + ["about:blank"]
     log_path = Path(profile["runtime_dir"]) / "browser.log"
     with log_path.open("ab") as log:
         process = await asyncio.create_subprocess_exec(*command, env=browser_environment(profile, env), stdout=log, stderr=log, start_new_session=True)
@@ -401,6 +452,24 @@ async def launch_native(profile: dict[str, Any], proxy: str | None, env: dict[st
         await asyncio.sleep(0.5)
         if process.returncode is not None:
             raise RuntimeError(f"{profile['browser_type']} exited during startup (code {process.returncode}); see {log_path}.")
+        if ready is not None:
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=20)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("Chromium WebRTC extension did not become ready; initial webpages were not opened.") from exc
+            if urls:
+                # Chromium's normal process-singleton IPC opens these URLs in
+                # the existing instance; this process exits after forwarding.
+                with log_path.open("ab") as log:
+                    opener = await asyncio.create_subprocess_exec(command[0], "--no-sandbox", f"--user-data-dir={profile['user_data_dir']}", *urls, env=browser_environment(profile, env), stdout=log, stderr=log)
+                try:
+                    await asyncio.wait_for(opener.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    opener.terminate()
+                    await opener.wait()
+                    raise RuntimeError("Chromium could not open the configured startup URLs.")
+                if opener.returncode:
+                    raise RuntimeError("Chromium could not open the configured startup URLs.")
         return context
     except BaseException:
         await context.close()
@@ -410,9 +479,11 @@ async def launch_native(profile: dict[str, Any], proxy: str | None, env: dict[st
 class CamoufoxContext:
     """Own both a persistent Playwright context and its driver lifecycle."""
 
-    def __init__(self, context: Any, playwright: Any):
+    def __init__(self, context: Any, playwright: Any, server_process: asyncio.subprocess.Process | None = None, endpoint: str | None = None):
         self._context = context
         self._playwright = playwright
+        self._server_process = server_process
+        self.playwright_ws_url = endpoint
         self._stop_task: asyncio.Task | None = None
         self._closing = False
         context.on("close", self._on_closed)
@@ -422,8 +493,15 @@ class CamoufoxContext:
 
     def _stop_driver(self) -> asyncio.Task:
         if self._stop_task is None:
-            self._stop_task = asyncio.create_task(self._playwright.stop())
+            self._stop_task = asyncio.create_task(self._shutdown())
         return self._stop_task
+
+    async def _shutdown(self) -> None:
+        try:
+            if self._server_process:
+                await _stop_camoufox_server(self._server_process)
+        finally:
+            await self._playwright.stop()
 
     def _on_closed(self) -> None:
         if not self._closing:
@@ -432,7 +510,13 @@ class CamoufoxContext:
     async def close(self) -> None:
         self._closing = True
         try:
-            await self._context.close()
+            if self._server_process:
+                # Unload persistent pages before the server's Browser.close;
+                # Firefox otherwise can exit with localStorage still buffered.
+                for page in list(self._context.pages):
+                    await page.close()
+            else:
+                await self._context.close()
         finally:
             await self._stop_driver()
 
@@ -451,6 +535,11 @@ def camoufox_options(profile: dict[str, Any], proxy: str | None, env: dict[str, 
         config = {key: value for key, value in config.items() if not key.startswith("locale:") and key not in {"navigator.language", "navigator.languages", "headers.Accept-Language"}}
     config.update(profile.get("camoufox_config") or {})
     config.update({"screen.width": profile.get("screen_width", 1920), "screen.height": profile.get("screen_height", 1080)})
+    # The virtual desktop has no reserved taskbar. Supply the full available
+    # rectangle up front so the SDK cannot add it on a later launch.
+    for key, value in {"screen.availLeft": 0, "screen.availTop": 0,
+                       "screen.availWidth": config["screen.width"], "screen.availHeight": config["screen.height"]}.items():
+        config.setdefault(key, value)
     if profile.get("timezone"):
         config["timezone"] = profile["timezone"]
     if profile.get("fingerprint_seed") is not None:
@@ -468,6 +557,11 @@ def camoufox_options(profile: dict[str, Any], proxy: str | None, env: dict[str, 
         config["timezone"] = profile["timezone"]
     if bool(profile.get("gpu_vendor")) != bool(profile.get("gpu_renderer")):
         raise ValueError("Camoufox requires both GPU vendor and GPU renderer, or neither.")
+    args = list(profile.get("launch_args") or [])
+    if any(arg.startswith(("--remote-debugging", "--remote-allow", "--juggler", "-juggler")) for arg in args):
+        raise ValueError("Use the debugging toggles rather than custom remote-control arguments.")
+    if profile.get("remote_debugging_port"):
+        args.append(f"--remote-debugging-port={profile['remote_debugging_port']}")
     options = launch_options(
         config=config, os=profile.get("platform", "windows"),
         webgl_config=(profile["gpu_vendor"], profile["gpu_renderer"]) if profile.get("gpu_vendor") else None,
@@ -477,14 +571,14 @@ def camoufox_options(profile: dict[str, Any], proxy: str | None, env: dict[str, 
         addons=[],
         firefox_user_prefs=firefox_preferences(profile, None),
         window=(profile.get("screen_width", 1920), profile.get("screen_height", 1080)),
-        args=profile.get("launch_args") or [],
+        args=args,
         i_know_what_im_doing=True,
     )
     # Persist the generated identity, rather than rotating it on each launch.
     config_json = "".join(options["env"][f"CAMOU_CONFIG_{index}"] for index in range(1, 100) if f"CAMOU_CONFIG_{index}" in options["env"])
     if config_json:
         directory.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"identity": identity, "locale": profile.get("locale"), "config": json.loads(config_json)}))
+        path.write_text(json.dumps({"identity": identity, "locale": profile.get("locale"), "config": json.loads(config_json)}, sort_keys=True))
     options["user_data_dir"] = str(directory)
     options["no_viewport"] = True
     if profile.get("color_scheme"):
@@ -492,14 +586,92 @@ def camoufox_options(profile: dict[str, Any], proxy: str | None, env: dict[str, 
     return options
 
 
-async def launch_camoufox(profile: dict[str, Any], proxy: str | None, env: dict[str, str], keepassxc: bool) -> CamoufoxContext:
+async def _stop_camoufox_server(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            process.kill()
+    await process.wait()
+
+
+async def _launch_camoufox_server(options: dict[str, Any], profile: dict[str, Any]) -> tuple[asyncio.subprocess.Process, str]:
+    from playwright._impl._driver import compute_driver_executable
+
+    node, cli = compute_driver_executable()
+    # Camel-case only top-level options; preferences and environment keys keep
+    # their literal names. Persist the original profile, never a temporary one.
+    options = options.copy()
+    directory = options.pop("user_data_dir")
+    options.pop("no_viewport", None)
+    options = {re.sub(r"_([a-z])", lambda match: match[1].upper(), key): value for key, value in options.items() if value is not None}
+    path = "/" + secrets.token_urlsafe(24)
+    options.update(_userDataDir=directory, _sharedBrowser=True, noDefaultViewport=True,
+                   handleSIGTERM=False, handleSIGINT=False, handleSIGHUP=False,
+                   host="127.0.0.1", port=profile["playwright_port"], wsPath=path)
+    log_path = Path(profile["runtime_dir"]) / "playwright-server.log"
+    with log_path.open("ab") as log:
+        process = await asyncio.create_subprocess_exec(
+            node, str(Path(__file__).with_name("camoufox_server.cjs")), str(Path(cli).parent),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=log,
+            env=options["env"],
+        )
+    try:
+        process.stdin.write(json.dumps(options).encode())
+        await process.stdin.drain()
+        process.stdin.close()
+        endpoint = (await asyncio.wait_for(process.stdout.readline(), timeout=60)).decode().strip()
+        if endpoint != f"ws://127.0.0.1:{profile['playwright_port']}{path}":
+            raise RuntimeError(f"Camoufox Playwright server failed to start; see {log_path}.")
+        return process, endpoint
+    except BaseException:
+        await _stop_camoufox_server(process)
+        raise
+
+
+async def launch_camoufox(profile: dict[str, Any], proxy: str | None, env: dict[str, str], keepassxc: bool) -> CamoufoxContext | NativeBrowserContext:
     from playwright.async_api import async_playwright
 
+    if profile.get("remote_debugging_port") and profile.get("playwright_port"):
+        raise ValueError("Camoufox BiDi and Playwright endpoints are mutually exclusive.")
     options = await asyncio.to_thread(camoufox_options, profile, proxy, env, keepassxc)
+    if profile.get("remote_debugging_port"):
+        # Native BiDi and Juggler conflict in Camoufox. Use its ordinary process
+        # for BiDi mode while keeping the same persistent data and fingerprint.
+        _prepare_firefox_profile(profile, proxy, keepassxc, options.get("firefox_user_prefs"))
+        args = ["--no-remote", "--new-instance", "--profile", profile["user_data_dir"],
+                "--width", str(profile.get("screen_width", 1920)), "--height", str(profile.get("screen_height", 1080))]
+        if profile.get("headless"):
+            args.append("--headless")
+        log_path = Path(profile["runtime_dir"]) / "browser.log"
+        with log_path.open("ab") as log:
+            process = await asyncio.create_subprocess_exec(options["executable_path"], *args, *(options.get("args") or []),
+                env=options["env"], stdout=log, stderr=log, start_new_session=True)
+        context = NativeBrowserContext(process, options["env"], "camoufox")
+        await asyncio.sleep(0.5)
+        if process.returncode is not None:
+            await context.close()
+            raise RuntimeError(f"Camoufox exited during startup; see {log_path}.")
+        return context
     playwright = await async_playwright().start()
+    server_process = None
+    endpoint = None
     try:
-        context = await playwright.firefox.launch_persistent_context(**options)
-        return CamoufoxContext(context, playwright)
+        if profile.get("playwright_port"):
+            server_process, endpoint = await _launch_camoufox_server(options, profile)
+            browser = await playwright.firefox.connect(endpoint)
+            if len(browser.contexts) != 1:
+                raise RuntimeError("Camoufox server did not expose the persistent profile context.")
+            context = browser.contexts[0]
+        else:
+            context = await playwright.firefox.launch_persistent_context(**options)
+        return CamoufoxContext(context, playwright, server_process, endpoint)
     except BaseException:
         await playwright.stop()
+        if server_process:
+            await _stop_camoufox_server(server_process)
         raise

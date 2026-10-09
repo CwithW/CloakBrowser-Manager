@@ -217,9 +217,27 @@ async def verify():
                     raise AssertionError(f"{browser_type} KeePassXC extension is not active")
                 if browser_type == "firefox":
                     assert '"browser.contentblocking.category", "strict"' in (paths / "user.js").read_text()
+                    # Check Firefox's live policy using ordinary input.
+                    subprocess.run(["xdotool", "key", "ctrl+l"], env={"DISPLAY": display}, check=True)
+                    subprocess.run(["xdotool", "type", "--clearmodifiers", "about:policies"], env={"DISPLAY": display}, check=True)
+                    subprocess.run(["xdotool", "key", "Return"], env={"DISPLAY": display}, check=True)
+                    for _ in range(30):
+                        await asyncio.sleep(0.2)
+                        subprocess.run(["xdotool", "mousemove", "300", "300", "click", "1", "key", "--clearmodifiers", "ctrl+a", "ctrl+c"], env={"DISPLAY": display}, check=True)
+                        if "DisableAppUpdate" in api("GET", f"/profiles/{profile['id']}/clipboard")["text"]:
+                            break
+                    else:
+                        raise AssertionError("Firefox did not activate its DisableAppUpdate policy")
             window = api("POST", f"/profiles/{profile['id']}/keepassxc/toggle-window")
             assert window["state"] in {"shown", "minimized"}
             api("POST", f"/profiles/{profile['id']}/stop")
+            if browser_type == "camoufox":
+                # Camoufox does not expose about:policies. Check the policy
+                # service's real applied state and the active binary's policy.
+                from camoufox.pkgman import camoufox_path
+                assert '"browser.policies.applied", true' in (paths / "prefs.js").read_text()
+                policy = camoufox_path(download_if_missing=False) / "distribution/policies.json"
+                assert json.loads(policy.read_text())["policies"]["DisableAppUpdate"] is True
             if browser_type == "chromium":
                 extensions = json.loads((paths / "Default/Preferences").read_text())["extensions"]["settings"].values()
                 assert any(addon.get("path") == EXTENSION and not addon.get("disable_reasons") for addon in extensions)

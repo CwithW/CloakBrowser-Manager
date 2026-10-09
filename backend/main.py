@@ -90,7 +90,7 @@ def _check_auth(scope: Scope) -> bool:
 def _is_https(request: Request) -> bool:
     """Check if the original client connection was HTTPS (via reverse proxy header)."""
     proto = request.headers.get("x-forwarded-proto", "")
-    return "https" in proto
+    return request.url.scheme == "https" or "https" in proto
 
 
 async def _check_websocket_origin(websocket: WebSocket) -> bool:
@@ -409,6 +409,8 @@ async def list_profiles():
         p["status"] = status["status"]
         p["vnc_ws_port"] = status["vnc_ws_port"]
         p["cdp_url"] = status["cdp_url"]
+        p["bidi_url"] = status.get("bidi_url")
+        p["playwright_url"] = status.get("playwright_url")
         p["tags"] = [TagResponse(**t) for t in p.get("tags", [])]
         result.append(ProfileResponse(**p))
     return result
@@ -427,6 +429,8 @@ async def create_profile(req: ProfileCreate):
     profile["status"] = status["status"]
     profile["vnc_ws_port"] = status["vnc_ws_port"]
     profile["cdp_url"] = status["cdp_url"]
+    profile["bidi_url"] = status.get("bidi_url")
+    profile["playwright_url"] = status.get("playwright_url")
     profile["tags"] = [TagResponse(**t) for t in profile.get("tags", [])]
     return ProfileResponse(**profile)
 
@@ -440,6 +444,8 @@ async def get_profile(profile_id: str):
     profile["status"] = status["status"]
     profile["vnc_ws_port"] = status["vnc_ws_port"]
     profile["cdp_url"] = status["cdp_url"]
+    profile["bidi_url"] = status.get("bidi_url")
+    profile["playwright_url"] = status.get("playwright_url")
     profile["tags"] = [TagResponse(**t) for t in profile.get("tags", [])]
     return ProfileResponse(**profile)
 
@@ -448,6 +454,12 @@ async def get_profile(profile_id: str):
 async def update_profile(profile_id: str, req: ProfileUpdate):
     # Only pass fields that were explicitly set
     data = req.model_dump(exclude_unset=True)
+    existing = db.get_profile(profile_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    merged = {**existing, **data}
+    if merged["browser_type"] == "camoufox" and merged.get("remote_debugging_enabled") and merged.get("playwright_enabled"):
+        raise HTTPException(status_code=422, detail="Camoufox BiDi and Playwright endpoints are mutually exclusive")
     tags = data.pop("tags", None)
     if tags is not None:
         data["tags"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in tags]
@@ -458,6 +470,8 @@ async def update_profile(profile_id: str, req: ProfileUpdate):
     profile["status"] = status["status"]
     profile["vnc_ws_port"] = status["vnc_ws_port"]
     profile["cdp_url"] = status["cdp_url"]
+    profile["bidi_url"] = status.get("bidi_url")
+    profile["playwright_url"] = status.get("playwright_url")
     profile["tags"] = [TagResponse(**t) for t in profile.get("tags", [])]
     return ProfileResponse(**profile)
 
@@ -512,6 +526,8 @@ async def launch_profile(profile_id: str):
         vnc_ws_port=running.ws_port,
         display=f":{running.display}",
         cdp_url=f"/api/profiles/{profile_id}/cdp" if running.cdp_port is not None else None,
+        bidi_url=f"/api/profiles/{profile_id}/bidi" if running.bidi_port is not None else None,
+        playwright_url=f"/api/profiles/{profile_id}/playwright" if running.playwright_port is not None else None,
     )
 
 
@@ -763,7 +779,7 @@ async def cdp_info(profile_id: str):
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
     if running.cdp_port is None:
-        raise HTTPException(status_code=400, detail="CDP is only available for CloakBrowser profiles")
+        raise HTTPException(status_code=400, detail="CDP is not enabled for this profile")
     return {
         "cdp_url": f"/api/profiles/{profile_id}/cdp",
         "usage": "playwright.chromium.connect_over_cdp('http://<host>/api/profiles/"
@@ -779,7 +795,7 @@ async def cdp_json_version(profile_id: str, request: Request):
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
     if running.cdp_port is None:
-        raise HTTPException(status_code=400, detail="CDP is only available for CloakBrowser profiles")
+        raise HTTPException(status_code=400, detail="CDP is not enabled for this profile")
 
     try:
         async with httpx.AsyncClient() as client:
@@ -808,7 +824,7 @@ async def cdp_json_list(profile_id: str, request: Request):
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
     if running.cdp_port is None:
-        raise HTTPException(status_code=400, detail="CDP is only available for CloakBrowser profiles")
+        raise HTTPException(status_code=400, detail="CDP is not enabled for this profile")
 
     try:
         async with httpx.AsyncClient() as client:
@@ -831,13 +847,10 @@ async def cdp_json_list(profile_id: str, request: Request):
     return data
 
 
-async def _proxy_cdp_websocket(
+async def _proxy_browser_websocket(
     websocket: WebSocket, target_url: str, label: str,
 ) -> None:
-    """Bidirectional WebSocket proxy between a FastAPI client and a CDP target.
-
-    Used by both browser-level and page-level CDP proxy endpoints.
-    """
+    """Proxy the selected browser protocol using the manager's access controls."""
     import websockets
 
     try:
@@ -880,6 +893,7 @@ async def _proxy_cdp_websocket(
             )
             for task in pending:
                 task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
             logger.info("%s: disconnected", label)
 
     except Exception as exc:
@@ -902,7 +916,7 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
         await websocket.close(code=4004, reason="Profile not running")
         return
     if running.cdp_port is None:
-        await websocket.close(code=4005, reason="CDP is only available for CloakBrowser profiles")
+        await websocket.close(code=4005, reason="CDP is not enabled for this profile")
         return
 
     await websocket.accept()
@@ -919,7 +933,7 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
         await websocket.close(code=4005, reason="CDP not available")
         return
 
-    await _proxy_cdp_websocket(websocket, ws_url, f"CDP proxy [{profile_id}]")
+    await _proxy_browser_websocket(websocket, ws_url, f"CDP proxy [{profile_id}]")
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp/devtools/{path:path}")
@@ -933,13 +947,45 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
         await websocket.close(code=4004, reason="Profile not running")
         return
     if running.cdp_port is None:
-        await websocket.close(code=4005, reason="CDP is only available for CloakBrowser profiles")
+        await websocket.close(code=4005, reason="CDP is not enabled for this profile")
         return
 
     await websocket.accept()
 
     target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
-    await _proxy_cdp_websocket(websocket, target_url, f"CDP page proxy [{profile_id}]")
+    await _proxy_browser_websocket(websocket, target_url, f"CDP page proxy [{profile_id}]")
+
+
+@app.get("/api/profiles/{profile_id}/bidi")
+@app.get("/api/profiles/{profile_id}/playwright")
+async def remote_protocol_info(profile_id: str, request: Request):
+    protocol = request.url.path.rsplit("/", 1)[1]
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        raise HTTPException(status_code=404, detail="Profile not running")
+    if getattr(running, f"{protocol}_port") is None:
+        raise HTTPException(status_code=400, detail=f"{protocol} is not enabled for this profile")
+    scheme = "wss" if _is_https(request) else "ws"
+    return {"endpoint": f"{scheme}://{request.headers['host']}/api/profiles/{profile_id}/{protocol}"}
+
+
+@app.websocket("/api/profiles/{profile_id}/bidi")
+@app.websocket("/api/profiles/{profile_id}/playwright")
+async def remote_protocol_proxy(websocket: WebSocket, profile_id: str):
+    if not await _check_websocket_origin(websocket):
+        return
+    protocol = websocket.url.path.rsplit("/", 1)[1]
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        await websocket.close(code=4004, reason="Profile not running")
+        return
+    port = getattr(running, f"{protocol}_port")
+    if port is None:
+        await websocket.close(code=4005, reason=f"{protocol} is not enabled for this profile")
+        return
+    await websocket.accept()
+    target = f"ws://127.0.0.1:{port}/session" if protocol == "bidi" else running.context.playwright_ws_url
+    await _proxy_browser_websocket(websocket, target, f"{protocol} proxy [{profile_id}]")
 
 
 # ── Static Frontend ───────────────────────────────────────────────────────────

@@ -156,6 +156,9 @@ def test_camoufox_generated_identity_persists_but_behavior_updates(tmp_path, mon
     first = engines.camoufox_options(profile, None, {}, False)
     second = engines.camoufox_options({**profile, "humanize": False}, None, {}, False)
     config = json.loads(second["env"]["CAMOU_CONFIG_1"])
+    assert {key: config[key] for key in ("screen.availLeft", "screen.availTop", "screen.availWidth", "screen.availHeight")} == {
+        "screen.availLeft": 0, "screen.availTop": 0, "screen.availWidth": 1920, "screen.availHeight": 1080,
+    }
     assert config["navigator.userAgent"] == json.loads(first["env"]["CAMOU_CONFIG_1"])["navigator.userAgent"]
     assert "humanize" not in config
     assert second["user_data_dir"] == str(tmp_path)

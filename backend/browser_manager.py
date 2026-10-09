@@ -376,6 +376,8 @@ class RunningProfile:
     user_data_dir: Path | None = None
     keepassxc_process: asyncio.subprocess.Process | None = None
     keepassxc_runtime_dir: Path | None = None
+    bidi_port: int | None = None
+    playwright_port: int | None = None
 
 
 class BrowserManager:
@@ -400,6 +402,8 @@ class BrowserManager:
         browser_type = profile.get("browser_type", "cloakbrowser")
         if browser_type not in {"cloakbrowser", "chromium", "firefox", "camoufox"}:
             raise ValueError(f"Unsupported browser type: {browser_type}")
+        if browser_type == "camoufox" and profile.get("remote_debugging_enabled") and profile.get("playwright_enabled"):
+            raise ValueError("Camoufox BiDi and Playwright endpoints are mutually exclusive.")
         keepassxc_enabled = profile.get("keepassxc_enabled")
         if keepassxc_enabled is None:
             keepassxc_enabled = (browser_type != "cloakbrowser" or _launch_args_include_keepassxc(profile.get("launch_args")))
@@ -412,7 +416,10 @@ class BrowserManager:
         display, ws_port = await self.vnc.allocate()
 
         try:
-            cdp_port = self._allocate_cdp_port() if browser_type == "cloakbrowser" else None
+            debugging = bool(profile.get("remote_debugging_enabled"))
+            cdp_port = self._allocate_cdp_port() if browser_type == "cloakbrowser" or (browser_type == "chromium" and debugging) else None
+            bidi_port = self._allocate_cdp_port() if browser_type in {"firefox", "camoufox"} and debugging else None
+            playwright_port = self._allocate_cdp_port() if browser_type == "camoufox" and profile.get("playwright_enabled") else None
         except ValueError:
             async with self._lock:
                 self._launching.discard(profile_id)
@@ -500,7 +507,8 @@ class BrowserManager:
             else:
                 launch = launch_camoufox if browser_type == "camoufox" else launch_native
                 context = await launch(
-                    {**profile, "browser_type": browser_type, "runtime_dir": str(keepassxc_runtime_dir)},
+                    {**profile, "browser_type": browser_type, "runtime_dir": str(keepassxc_runtime_dir),
+                     "remote_debugging_port": cdp_port or bidi_port, "playwright_port": playwright_port},
                     proxy, browser_env, bool(keepassxc_enabled),
                 )
 
@@ -519,7 +527,7 @@ class BrowserManager:
                     }
                 });
             """
-            if browser_type in {"cloakbrowser", "camoufox"}:
+            if browser_type in {"cloakbrowser", "camoufox"} and hasattr(context, "add_init_script"):
                 await context.add_init_script(_clipboard_init_js)
             # Also inject into already-open pages (about:blank created before init_script)
             for p in context.pages:
@@ -538,6 +546,8 @@ class BrowserManager:
                 user_data_dir=user_data_dir,
                 keepassxc_process=keepassxc_process,
                 keepassxc_runtime_dir=keepassxc_runtime_dir,
+                bidi_port=bidi_port,
+                playwright_port=playwright_port,
             )
 
             if not profile.get("headless", False):
@@ -1193,8 +1203,10 @@ class BrowserManager:
                 "vnc_ws_port": running.ws_port,
                 "display": f":{running.display}",
                 "cdp_url": f"/api/profiles/{profile_id}/cdp" if running.cdp_port is not None else None,
+                "bidi_url": f"/api/profiles/{profile_id}/bidi" if running.bidi_port is not None else None,
+                "playwright_url": f"/api/profiles/{profile_id}/playwright" if running.playwright_port is not None else None,
             }
-        return {"status": "stopped", "vnc_ws_port": None, "display": None, "cdp_url": None}
+        return {"status": "stopped", "vnc_ws_port": None, "display": None, "cdp_url": None, "bidi_url": None, "playwright_url": None}
 
     async def cleanup_all(self):
         """Stop all running profiles. Called on shutdown."""

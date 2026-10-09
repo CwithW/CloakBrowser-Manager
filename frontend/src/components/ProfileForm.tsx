@@ -1,7 +1,8 @@
 import { Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { BrowserType, Profile, ProfileCreateData } from "../lib/api";
+import type { BrowserType, Profile, ProfileCreateData, WebRTCMode } from "../lib/api";
 import { BROWSER_LABELS } from "../lib/browsers";
+import { BrowserConnections } from "./BrowserConnections";
 import {
   KEEPASSXC_EXTENSION_ALLOW_ARG,
   KEEPASSXC_EXTENSION_ARG,
@@ -67,6 +68,8 @@ const DEFAULT_FORM: ProfileCreateData = {
   name: "",
   browser_type: "cloakbrowser",
   use_gpu: true,
+  remote_debugging_enabled: false,
+  playwright_enabled: false,
   platform: "windows",
   screen_width: 1280,
   screen_height: 720,
@@ -105,6 +108,9 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel, onFiles }: Pr
     setForm(profile ? {
       name: profile.name,
       browser_type: profile.browser_type ?? "cloakbrowser",
+      webrtc_mode: profile.webrtc_mode ?? "enabled",
+      remote_debugging_enabled: profile.remote_debugging_enabled ?? false,
+      playwright_enabled: profile.playwright_enabled ?? false,
       use_gpu: profile.use_gpu ?? true,
       keepassxc_enabled: profile.keepassxc_enabled,
       fingerprint_seed: profile.fingerprint_seed,
@@ -268,6 +274,9 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel, onFiles }: Pr
                   const type = e.target.value as BrowserType;
                   setForm((prev) => ({
                     ...prev, browser_type: type,
+                    webrtc_mode: type === "cloakbrowser" ? "enabled" : "disabled",
+                    remote_debugging_enabled: false,
+                    playwright_enabled: false,
                     platform: type === "chromium" || type === "firefox" ? "linux" : "windows",
                     keepassxc_enabled: type === "cloakbrowser" ? null : true,
                     humanize: type === "cloakbrowser" || type === "camoufox",
@@ -493,6 +502,15 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel, onFiles }: Pr
         <section>
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Behavior</h3>
           <div className="space-y-3">
+            {browserType !== "cloakbrowser" && <div>
+              <label className="label" htmlFor="webrtc-mode">WebRTC</label>
+              <select id="webrtc-mode" className="input" value={form.webrtc_mode ?? "disabled"} onChange={(e) => set("webrtc_mode", e.target.value as WebRTCMode)}>
+                <option value="disabled">Disabled (default for new profiles)</option>
+                <option value="protect_ip">Protect IP</option>
+                <option value="enabled">Enabled (browser defaults)</option>
+              </select>
+              <p className="text-xs text-gray-500 mt-1">Takes effect on the next browser launch. Advanced settings can override these defaults. Disabled blocks WebRTC calls and data channels; Chromium uses an extension to block webpage access. Protect IP limits direct traffic and local address exposure; calls may require a compatible proxy or TURN server.</p>
+            </div>}
             {fingerprintBrowser && <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
               <input
                 type="checkbox"
@@ -565,6 +583,11 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel, onFiles }: Pr
             </div>
           </div>
         </section>
+
+        <BrowserConnections profileId={profile?.id} browserType={browserType}
+          remoteDebugging={form.remote_debugging_enabled ?? false} playwright={form.playwright_enabled ?? false}
+          onRemoteDebugging={(enabled) => setForm((prev) => ({ ...prev, remote_debugging_enabled: enabled, ...(browserType === "camoufox" && enabled ? { playwright_enabled: false } : {}) }))}
+          onPlaywright={(enabled) => setForm((prev) => ({ ...prev, playwright_enabled: enabled, ...(enabled ? { remote_debugging_enabled: false } : {}) }))} />
 
         {/* Tags */}
         <section>

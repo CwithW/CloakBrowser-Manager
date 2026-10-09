@@ -1,6 +1,12 @@
 #!/bin/bash
 set -e
 
+# The manager always uses the browser bundled with this release. Environment
+# overrides must not silently replace it or restart SDK background updates.
+export CLOAKBROWSER_BINARY_PATH=/opt/cbm/cloakbrowser/chrome
+export CLOAKBROWSER_AUTO_UPDATE=false
+export CLOAKBROWSER_VERSION="$(python -c 'import json; print(json.load(open("/opt/cbm/browser-versions.json"))["cloakbrowser"]["version"])')"
+
 if [ -z "${KEEPASSXC_DATABASE_PASSWORD:-}" ]; then
     echo "ERROR: KEEPASSXC_DATABASE_PASSWORD must be set to a non-empty value." >&2
     echo "Set it in docker-compose.yml or pass -e KEEPASSXC_DATABASE_PASSWORD=... to docker run." >&2

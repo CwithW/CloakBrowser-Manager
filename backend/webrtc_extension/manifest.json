@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Profile WebRTC control",
+  "version": "1.1.1",
+  "permissions": ["scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": {"service_worker": "ready.js"}
+}

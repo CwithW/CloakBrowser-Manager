@@ -79,6 +79,68 @@ describe("ProfileForm launch arguments", () => {
 });
 
 describe("ProfileForm browser types", () => {
+  it.each(["chromium", "firefox", "camoufox"])("defaults %s remote control off and saves endpoint toggles", async (type) => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<ProfileForm profile={null} onSave={onSave} onCancel={vi.fn()} />);
+    expect(screen.getByLabelText("CDP endpoint")).not.toBeNull();
+    fireEvent.change(screen.getByLabelText("Browser Type"), { target: { value: type } });
+    const label = type === "chromium" ? "Expose CDP" : "Expose WebDriver BiDi";
+    const toggle = screen.getByLabelText(label) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    expect(screen.queryByLabelText(type === "chromium" ? "CDP endpoint" : "BIDI endpoint")).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByLabelText(type === "chromium" ? "CDP endpoint" : "BIDI endpoint")).not.toBeNull();
+    if (type === "camoufox") {
+      const extra = screen.getByLabelText("Expose Camoufox Playwright") as HTMLInputElement;
+      expect(extra.checked).toBe(false);
+      fireEvent.click(extra);
+      expect(toggle.checked).toBe(false);
+      expect(screen.queryByLabelText("BIDI endpoint")).toBeNull();
+      expect(screen.getByLabelText("Playwright endpoint")).not.toBeNull();
+      expect(screen.getByText(/firefox.connect/, { selector: "code" })).not.toBeNull();
+    }
+    fireEvent.change(screen.getByPlaceholderText("e.g. Amazon Seller #1"), { target: { value: "Remote" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({ remote_debugging_enabled: type !== "camoufox", playwright_enabled: type === "camoufox" })));
+  });
+
+  it("shows the existing profile ID in connection examples and hides disabled endpoints", () => {
+    const profile = { id: "existing-uuid", name: "Existing", browser_type: "camoufox", launch_args: [], tags: [], remote_debugging_enabled: true, playwright_enabled: false } as unknown as Profile;
+    render(<ProfileForm profile={profile} onSave={vi.fn()} onCancel={vi.fn()} />);
+    expect((screen.getByLabelText("BIDI endpoint") as HTMLInputElement).value).toContain("/api/profiles/existing-uuid/bidi");
+    expect(screen.queryByLabelText("Playwright endpoint")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Expose Camoufox Playwright"));
+    expect(screen.queryByLabelText("BIDI endpoint")).toBeNull();
+    expect((screen.getByLabelText("Playwright endpoint") as HTMLInputElement).value).toContain("/api/profiles/existing-uuid/playwright");
+    fireEvent.click(screen.getByLabelText("Expose WebDriver BiDi"));
+    expect(screen.getByLabelText("BIDI endpoint")).not.toBeNull();
+    expect(screen.queryByLabelText("Playwright endpoint")).toBeNull();
+  });
+
+  it.each(["chromium", "firefox", "camoufox"])("creates %s with the WebRTC default and saves each choice", async (type) => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<ProfileForm profile={null} onSave={onSave} onCancel={vi.fn()} />);
+    expect(screen.queryByLabelText("WebRTC")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Browser Type"), { target: { value: type } });
+    expect((screen.getByLabelText("WebRTC") as HTMLSelectElement).value).toBe("disabled");
+    fireEvent.change(screen.getByPlaceholderText("e.g. Amazon Seller #1"), { target: { value: "WebRTC" } });
+    for (const mode of ["disabled", "protect_ip", "enabled"]) {
+      fireEvent.change(screen.getByLabelText("WebRTC"), { target: { value: mode } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      await waitFor(() => expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({ webrtc_mode: mode })));
+    }
+  });
+
+  it("preserves an older profile's WebRTC behavior and allows edits", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const profile = { id: "legacy", name: "Legacy", browser_type: "firefox", launch_args: [], tags: [] } as unknown as Profile;
+    render(<ProfileForm profile={profile} onSave={onSave} onCancel={vi.fn()} />);
+    expect((screen.getByLabelText("WebRTC") as HTMLSelectElement).value).toBe("enabled");
+    fireEvent.change(screen.getByLabelText("WebRTC"), { target: { value: "protect_ip" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({ webrtc_mode: "protect_ip" })));
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty("browser_type");
+  });
   it.each(["chromium", "firefox"])("shows shared settings and native defaults for %s", async (type) => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<ProfileForm profile={null} onSave={onSave} onCancel={vi.fn()} />);
