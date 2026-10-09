@@ -154,6 +154,15 @@ RUN --mount=type=cache,target=/var/cache/cbm-browsers,sharing=locked \
     python /opt/cbm/install_browsers.py camoufox \
     && python /opt/cbm/install_browsers.py verify
 
+# ChromeOS core families and broad multilingual coverage, including all Noto
+# CJK weights, symbols, math and emoji. Keep the existing Windows fonts too.
+RUN apt-get -o Acquire::Retries=5 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        fonts-croscore fonts-roboto fonts-noto-core fonts-noto-extra \
+        fonts-noto-mono fonts-noto-cjk fonts-noto-cjk-extra fonts-noto-color-emoji \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV CLOAKBROWSER_BINARY_PATH=/opt/cbm/cloakbrowser/chrome \
     CLOAKBROWSER_AUTO_UPDATE=false
 

@@ -218,8 +218,11 @@ async def verify():
                 if browser_type == "firefox":
                     assert '"browser.contentblocking.category", "strict"' in (paths / "user.js").read_text()
                     # Check Firefox's live policy using ordinary input.
-                    subprocess.run(["xdotool", "key", "ctrl+l"], env={"DISPLAY": display}, check=True)
-                    subprocess.run(["xdotool", "type", "--clearmodifiers", "about:policies"], env={"DISPLAY": display}, check=True)
+                    subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+l"], env={"DISPLAY": display}, check=True)
+                    # X11 key delivery precedes Firefox's asynchronous focus
+                    # change. Wait before typing so the URL prefix is retained.
+                    await asyncio.sleep(0.2)
+                    subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "25", "about:policies"], env={"DISPLAY": display}, check=True)
                     subprocess.run(["xdotool", "key", "Return"], env={"DISPLAY": display}, check=True)
                     for _ in range(30):
                         await asyncio.sleep(0.2)

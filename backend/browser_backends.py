@@ -13,6 +13,7 @@ import secrets
 import shutil
 import signal
 import sys
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Any, Callable
@@ -579,6 +580,15 @@ def camoufox_options(profile: dict[str, Any], proxy: str | None, env: dict[str, 
     if config_json:
         directory.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"identity": identity, "locale": profile.get("locale"), "config": json.loads(config_json)}, sort_keys=True))
+    if (profile.get("camoufox_config") or {}).get("fonts"):
+        # Explicit font identities may use image fonts beyond the OS bundle.
+        # Leave generated identities on the SDK's original isolated fontconfig.
+        fontconfig = ET.Element("fontconfig")
+        ET.SubElement(fontconfig, "include").text = options["env"]["FONTCONFIG_FILE"]
+        ET.SubElement(fontconfig, "dir").text = "/usr/share/fonts"
+        fontconfig_path = directory / "camoufox-fonts.conf"
+        ET.ElementTree(fontconfig).write(fontconfig_path, encoding="utf-8", xml_declaration=True)
+        options["env"]["FONTCONFIG_FILE"] = str(fontconfig_path)
     options["user_data_dir"] = str(directory)
     options["no_viewport"] = True
     if profile.get("color_scheme"):

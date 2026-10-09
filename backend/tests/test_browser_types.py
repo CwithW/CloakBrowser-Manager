@@ -166,6 +166,26 @@ def test_camoufox_generated_identity_persists_but_behavior_updates(tmp_path, mon
     assert calls[-1]["config"].get("navigator.userAgent") is None
 
 
+@pytest.mark.parametrize("fonts", [None, [], ["Arimo", "Tinos", "Cousine"]])
+def test_camoufox_image_fonts_require_explicit_font_identity(tmp_path, monkeypatch, fonts):
+    import xml.etree.ElementTree as ET
+
+    bundled = str(tmp_path / "bundled & isolated.conf")
+    def launch_options(**kwargs):
+        return {"env": {"FONTCONFIG_FILE": bundled, "CAMOU_CONFIG_1": json.dumps(kwargs["config"])}}
+    monkeypatch.setitem(sys.modules, "camoufox.utils", SimpleNamespace(launch_options=launch_options))
+    profile = {"browser_type": "camoufox", "user_data_dir": str(tmp_path), "camoufox_config": {"fonts": fonts} if fonts is not None else {}}
+    options = engines.camoufox_options(profile, None, {}, False)
+    if fonts:
+        config = ET.parse(options["env"]["FONTCONFIG_FILE"]).getroot()
+        assert config.find("include").text == bundled
+        assert config.find("dir").text == "/usr/share/fonts"
+        assert json.loads(options["env"]["CAMOU_CONFIG_1"])["fonts"] == fonts
+    else:
+        assert options["env"]["FONTCONFIG_FILE"] == bundled
+        assert not (tmp_path / "camoufox-fonts.conf").exists()
+
+
 @pytest.mark.asyncio
 async def test_camoufox_finishes_persistent_context_close_before_stopping_driver():
     callbacks = {}
