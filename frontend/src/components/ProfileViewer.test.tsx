@@ -42,6 +42,32 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.useRealTimers();
+});
+
+describe("ProfileViewer recovery and navigation", () => {
+  it("returns to settings without stopping the browser", () => {
+    const onDisconnect = vi.fn();
+    render(<ProfileViewer profileId="one" cdpUrl={null} clipboardSync={false} keepassxcEnabled={false} onDisconnect={onDisconnect} />);
+    fireEvent.click(screen.getByLabelText("Back to profile settings"));
+    expect(onDisconnect).toHaveBeenCalledOnce();
+  });
+
+  it("keeps polling after a transient clipboard failure", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    renderViewer(false);
+    const toggle = screen.getByTitle("Enable clipboard sync") as HTMLButtonElement;
+    await waitFor(() => expect(toggle.disabled).toBe(false));
+    mockedApi.getClipboard.mockRejectedValueOnce(new Error("temporary failure")).mockResolvedValue({ text: "recovered" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    fireEvent.click(toggle);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockedApi.getClipboard).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockedApi.getClipboard).toHaveBeenCalledTimes(2);
+    expect(writeText).toHaveBeenCalledWith("recovered");
+  });
 });
 
 function renderViewer(keepassxcEnabled: boolean) {

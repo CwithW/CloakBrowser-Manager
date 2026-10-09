@@ -23,7 +23,38 @@ Free, self-hosted alternative to Multilogin, GoLogin, and AdsPower.
 <img src="https://i.imgur.com/XFYn1qY.png" width="800" alt="CloakBrowser Manager — Profile Settings">
 </p>
 
-Each profile is an isolated CloakBrowser instance with its own fingerprint, proxy, cookies, and session data. Profiles persist across restarts. Everything runs in one Docker container.
+Each profile is an isolated CloakBrowser, native Chromium, native Firefox ESR, or Camoufox instance with its own proxy, cookies, and session data. Profiles persist across restarts. All four browsers are bundled in one Docker image.
+
+## Browser types
+
+Select the browser type when creating a profile. It cannot be changed after creation. Upgrading an existing installation adds the type `cloakbrowser` to old database rows without moving or replacing their browser directories, cookies, bookmarks, extension state, or KeePassXC databases. Keep the existing `/data` volume and KeePassXC password when upgrading.
+
+| Type | Launch method | Fingerprint settings | Defaults |
+| --- | --- | --- | --- |
+| CloakBrowser | Existing CloakBrowser API | Seed, platform, GPU, CPU, screen | Existing profile settings are preserved |
+| Chromium | Direct subprocess; no automation flags or CDP | Native Linux browser identity | KeePassXC-Browser enabled |
+| Firefox | Direct subprocess; no WebDriver, Marionette, or CDP | Native Linux browser identity | Strict tracking protection and KeePassXC-Browser enabled |
+| Camoufox | Official Camoufox/Playwright API | Platform, screen, CPU, supported WebGL pair, advanced config | Persistent generated fingerprint and KeePassXC-Browser enabled |
+
+All types share `proxy`, `timezone`, `locale`, `screen_width`, `screen_height`, `launch_args`, `notes`, `user_agent`, `color_scheme`, tags, clipboard synchronization, and automatic launch. Native browsers apply timezone through `TZ`, language through native preferences/arguments, and use the X11 clipboard. CDP remains available only for CloakBrowser.
+
+New Chromium/Firefox/Camoufox profiles use `keepassxc_enabled` to control the bundled extension. Old CloakBrowser profiles retain their existing extension launch arguments. Firefox preferences can be set with `firefox_preferences` (JSON values: boolean, integer, or string); the native Firefox default is strict tracking protection, and supplied preferences can override those defaults. Camoufox exposes `camoufox_config` for advanced fingerprint properties. Generated Camoufox identities are saved in the profile directory; changing the seed or fingerprint settings regenerates the identity. Use a WebGL vendor/renderer pair supported by Camoufox for the selected platform. Humanization and GeoIP are available for CloakBrowser/Camoufox.
+
+Native proxies support HTTP, HTTPS, and unauthenticated SOCKS5. HTTP(S) proxy credentials are provided by a local per-profile extension without putting credentials on the process command line. Firefox ESR permits that local authentication extension by disabling its signature requirement for profiles using proxy credentials. Authenticated SOCKS5 is not supported by native Chromium/Firefox. Native profiles use normal windowed mode and reject headless, automation and remote debugging launch arguments. Headless mode remains available for CloakBrowser and Camoufox.
+
+GPU acceleration is optional for Chromium, Firefox, and Camoufox: enable **Use GPU when available** and expose accessible `/dev/dri` render devices. Without a render device the profile falls back to software rendering. CloakBrowser continues to use software rendering.
+
+```bash
+# Only on hosts that provide /dev/dri:
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+# Or add --device /dev/dri:/dev/dri to docker run.
+```
+
+Each browser has a persistent, isolated Home directory at `<user_data_dir>/Home`; its default downloads directory is `Home/Downloads`. Open **Files** in Profile settings or the folder button in the VNC toolbar to browse, upload (up to 512 MiB per file), and download files. Uploading an existing filename is rejected to preserve its contents. The VNC back button returns to Profile settings while leaving the browser running.
+
+Clipboard forwarding keeps its X11 selection owner in the foreground and cleans it up on profile stop. Reads/writes have timeouts, and automatic synchronization retries transient errors instead of stopping permanently. If the frontend browser denies clipboard access, the manual transfer buttons offer a text dialog.
+
+Docker E2E coverage is in `scripts/e2e_browser_types.py`. Run its `seed` mode in an old image and `verify` in the new image using the same disposable `/data` volume. Native browser page state is reported to a local fixture without attaching an automation or debugging connection.
 
 ```bash
 docker run --init -p 8080:8080 -v cloakprofiles:/data \

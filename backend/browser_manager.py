@@ -1,4 +1,4 @@
-"""Launch/stop/track CloakBrowser instances per profile."""
+"""Launch/stop/track isolated browser instances per profile."""
 
 from __future__ import annotations
 
@@ -18,6 +18,9 @@ from typing import Any, Literal
 
 from cloakbrowser import launch_persistent_context_async
 
+from .browser_backends import FIREFOX_EXTENSION_XPI, gpu_device, launch_camoufox, launch_native
+from .clipboard import ClipboardManager
+from .profile_files import profile_home
 from .vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
@@ -187,6 +190,10 @@ def _ensure_keepassxc_config(paths: KeePassXCPaths) -> None:
         lines = []
 
     _set_ini_root_value(lines, "SingleInstance", "false")
+    # Managed instances must not open a first-run modal while another browser
+    # takes focus during automatic database unlock.
+    _set_ini_value(lines, "General", "UpdateCheckMessageShown", "true")
+    _set_ini_value(lines, "GUI", "CheckForUpdates", "false")
     _set_ini_value(lines, "Browser", "Enabled", "true")
     _set_ini_value(lines, "Browser", "UpdateBinaryPath", "false")
     for key in (
@@ -364,7 +371,8 @@ class RunningProfile:
     context: Any  # Playwright BrowserContext
     display: int
     ws_port: int
-    cdp_port: int
+    cdp_port: int | None
+    browser_type: str = "cloakbrowser"
     user_data_dir: Path | None = None
     keepassxc_process: asyncio.subprocess.Process | None = None
     keepassxc_runtime_dir: Path | None = None
@@ -376,6 +384,7 @@ class BrowserManager:
         self._keepassxc_password: str | None = None
         self._launching: set[str] = set()  # profile IDs currently being launched
         self.vnc = VNCManager()
+        self.clipboard = ClipboardManager()
         self._lock = asyncio.Lock()
         self._next_cdp_port = BASE_CDP_PORT
         self._auto_launch_task: asyncio.Task | None = None
@@ -388,7 +397,12 @@ class BrowserManager:
     async def launch(self, profile: dict[str, Any]) -> RunningProfile:
         """Launch a browser instance for the given profile."""
         profile_id = profile["id"]
-        keepassxc_enabled = _launch_args_include_keepassxc(profile.get("launch_args"))
+        browser_type = profile.get("browser_type", "cloakbrowser")
+        if browser_type not in {"cloakbrowser", "chromium", "firefox", "camoufox"}:
+            raise ValueError(f"Unsupported browser type: {browser_type}")
+        keepassxc_enabled = profile.get("keepassxc_enabled")
+        if keepassxc_enabled is None:
+            keepassxc_enabled = (browser_type != "cloakbrowser" or _launch_args_include_keepassxc(profile.get("launch_args")))
 
         async with self._lock:
             if profile_id in self.running or profile_id in self._launching:
@@ -398,7 +412,7 @@ class BrowserManager:
         display, ws_port = await self.vnc.allocate()
 
         try:
-            cdp_port = self._allocate_cdp_port()
+            cdp_port = self._allocate_cdp_port() if browser_type == "cloakbrowser" else None
         except ValueError:
             async with self._lock:
                 self._launching.discard(profile_id)
@@ -407,12 +421,16 @@ class BrowserManager:
 
         # Clean stale Chromium lock files (left by previous container crashes)
         user_data_dir = Path(profile["user_data_dir"])
-        for lock_file in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-            lock_path = user_data_dir / lock_file
-            lock_path.unlink(missing_ok=True)
+        if browser_type in {"cloakbrowser", "chromium"}:
+            for lock_file in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                lock_path = user_data_dir / lock_file
+                lock_path.unlink(missing_ok=True)
 
         # Set up bookmarks and search engine on first launch
-        _init_profile_defaults(user_data_dir)
+        if browser_type in {"cloakbrowser", "chromium"}:
+            _init_profile_defaults(user_data_dir)
+        else:
+            user_data_dir.mkdir(parents=True, exist_ok=True)
 
         context: Any | None = None
         keepassxc_process: asyncio.subprocess.Process | None = None
@@ -429,14 +447,13 @@ class BrowserManager:
                 ws_port,
                 width=profile.get("screen_width", 1920),
                 height=profile.get("screen_height", 1080),
+                gpu_device=gpu_device(profile),
             )
 
-            # Build fingerprint args from profile settings
-            extra_args = self._build_fingerprint_args(profile)
-            extra_args += profile.get("launch_args") or []
-            extra_args.append(f"--remote-debugging-port={cdp_port}")
-
             if keepassxc_enabled:
+                extension = FIREFOX_EXTENSION_XPI if browser_type in {"firefox", "camoufox"} else KEEPASSXC_EXTENSION_DIR
+                if not extension.exists():
+                    raise BrowserLaunchError(f"Bundled KeePassXC-Browser extension not found at {extension}.")
                 keepassxc_process, keepassxc_runtime_dir = await self._launch_keepassxc(
                     profile_id=profile_id,
                     user_data_dir=user_data_dir,
@@ -455,24 +472,37 @@ class BrowserManager:
                 display,
                 keepassxc_runtime_dir,
             )
-            context = await launch_persistent_context_async(
-                user_data_dir=profile["user_data_dir"],
-                headless=bool(profile.get("headless", False)),
-                proxy=proxy,
-                args=extra_args,
-                timezone=profile.get("timezone") or None,
-                locale=profile.get("locale") or None,
-                humanize=bool(profile.get("humanize", False)),
-                human_preset=profile.get("human_preset", "default"),
-                geoip=bool(profile.get("geoip", False)),
-                color_scheme=profile.get("color_scheme") or None,
-                user_agent=profile.get("user_agent") or None,
-                viewport={
-                    "width": profile.get("screen_width", 1920),
-                    "height": profile.get("screen_height", 1080) - 133,
-                },
-                env=browser_env,
-            )
+            browser_env["HOME"] = str(profile_home(profile))
+            if browser_type == "cloakbrowser":
+                extra_args = self._build_fingerprint_args(profile)
+                extra_args += profile.get("launch_args") or []
+                if keepassxc_enabled and not _launch_args_include_keepassxc(extra_args):
+                    extra_args.append(KEEPASSXC_EXTENSION_ARG)
+                extra_args.append(f"--remote-debugging-port={cdp_port}")
+                context = await launch_persistent_context_async(
+                    user_data_dir=profile["user_data_dir"],
+                    headless=bool(profile.get("headless", False)),
+                    proxy=proxy,
+                    args=extra_args,
+                    timezone=profile.get("timezone") or None,
+                    locale=profile.get("locale") or None,
+                    humanize=bool(profile.get("humanize", False)),
+                    human_preset=profile.get("human_preset", "default"),
+                    geoip=bool(profile.get("geoip", False)),
+                    color_scheme=profile.get("color_scheme") or None,
+                    user_agent=profile.get("user_agent") or None,
+                    viewport={
+                        "width": profile.get("screen_width", 1920),
+                        "height": profile.get("screen_height", 1080) - 133,
+                    },
+                    env=browser_env,
+                )
+            else:
+                launch = launch_camoufox if browser_type == "camoufox" else launch_native
+                context = await launch(
+                    {**profile, "browser_type": browser_type, "runtime_dir": str(keepassxc_runtime_dir)},
+                    proxy, browser_env, bool(keepassxc_enabled),
+                )
 
             # Inject clipboard listener: captures copied text on every page
             # so the GET /clipboard endpoint can read it via page.evaluate()
@@ -489,7 +519,8 @@ class BrowserManager:
                     }
                 });
             """
-            await context.add_init_script(_clipboard_init_js)
+            if browser_type in {"cloakbrowser", "camoufox"}:
+                await context.add_init_script(_clipboard_init_js)
             # Also inject into already-open pages (about:blank created before init_script)
             for p in context.pages:
                 try:
@@ -503,6 +534,7 @@ class BrowserManager:
                 display=display,
                 ws_port=ws_port,
                 cdp_port=cdp_port,
+                browser_type=browser_type,
                 user_data_dir=user_data_dir,
                 keepassxc_process=keepassxc_process,
                 keepassxc_runtime_dir=keepassxc_runtime_dir,
@@ -513,6 +545,9 @@ class BrowserManager:
                     running,
                     keepassxc_runtime_dir,
                 )
+
+            if keepassxc_process is not None and keepassxc_process.returncode is not None:
+                raise BrowserLaunchError("KeePassXC exited during browser startup.")
 
             # Auto-cleanup if browser crashes or user closes Chrome via VNC
             context.on("close", lambda: asyncio.ensure_future(
@@ -529,7 +564,7 @@ class BrowserManager:
                 )
 
             logger.info(
-                "Launched profile %s on display :%d (ws_port=%d, cdp_port=%d)",
+                "Launched profile %s on display :%d (ws_port=%d, cdp_port=%s)",
                 profile_id, display, ws_port, cdp_port,
             )
 
@@ -554,6 +589,7 @@ class BrowserManager:
 
         if running:
             logger.info("Browser closed for profile %s, cleaning up", profile_id)
+            await self.clipboard.cleanup(profile_id)
             await self._cleanup_keepassxc(
                 running.keepassxc_process,
                 running.keepassxc_runtime_dir,
@@ -570,6 +606,7 @@ class BrowserManager:
             return
 
         logger.info("Stopping profile %s", profile_id)
+        await self.clipboard.cleanup(profile_id)
 
         try:
             await running.context.close()
@@ -609,11 +646,6 @@ class BrowserManager:
         display: int,
     ) -> tuple[asyncio.subprocess.Process, Path]:
         """Create/unlock a profile database and start its KeePassXC server."""
-        if not KEEPASSXC_EXTENSION_DIR.is_dir():
-            raise BrowserLaunchError(
-                f"Bundled KeePassXC-Browser extension not found at {KEEPASSXC_EXTENSION_DIR}."
-            )
-
         password = self._keepassxc_password
         if password is None:
             raise RuntimeError("KeePassXC password was not initialized at manager startup.")
@@ -655,6 +687,7 @@ class BrowserManager:
             process.stdin.close()
 
             await self._wait_for_keepassxc_socket(process, paths)
+            await self._wait_for_keepassxc_window_ready(process, paths, display)
             logger.info(
                 "Started KeePassXC for profile %s (runtime=%s)",
                 profile_id,
@@ -749,6 +782,24 @@ class BrowserManager:
             "Timed out waiting for the KeePassXC browser integration socket at "
             f"{paths.socket}."
         )
+
+    async def _wait_for_keepassxc_window_ready(
+        self, process: asyncio.subprocess.Process, paths: KeePassXCPaths, display: int,
+    ) -> None:
+        # The integration socket is created before automatic unlock finishes.
+        # Wait for the database window before browser native messaging connects.
+        deadline = time.monotonic() + KEEPASSXC_SOCKET_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if process.returncode is not None:
+                raise BrowserLaunchError("KeePassXC exited while unlocking its database.")
+            code, title = await self._run_xdotool(
+                display, paths.runtime_dir,
+                ["search", "--all", "--pid", str(process.pid), "--name", " - KeePassXC$", "getwindowname"],
+            )
+            if code == 0 and title.strip() and "[locked]" not in title.lower():
+                return
+            await asyncio.sleep(0.1)
+        raise BrowserLaunchError("Timed out waiting for KeePassXC to unlock its database.")
 
     async def _cleanup_keepassxc(
         self,
@@ -887,7 +938,11 @@ class BrowserManager:
                     for part in raw_cmdline.split(b"\0")
                     if part
                 ]
-                if not args or expected_arg not in args:
+                firefox_profile = any(
+                    arg in {"--profile", "-profile"} and index + 1 < len(args) and args[index + 1] == str(user_data_dir)
+                    for index, arg in enumerate(args)
+                )
+                if not args or (expected_arg not in args and not firefox_profile):
                     continue
                 if any(arg.startswith("--type=") for arg in args[1:]):
                     continue
@@ -895,6 +950,7 @@ class BrowserManager:
                     "chrome",
                     "chromium",
                     "chromium-browser",
+                    "firefox", "firefox-esr", "firefox-bin", "camoufox", "camoufox-bin",
                 }:
                     continue
 
@@ -906,7 +962,7 @@ class BrowserManager:
                         "--pid",
                         proc_dir.name,
                         "--name",
-                        "Chromium",
+                        "Firefox|Camoufox" if running.browser_type in {"firefox", "camoufox"} else "Chromium",
                     ],
                     ["search", "--onlyvisible", "--pid", proc_dir.name],
                 )
@@ -1136,7 +1192,7 @@ class BrowserManager:
                 "status": "running",
                 "vnc_ws_port": running.ws_port,
                 "display": f":{running.display}",
-                "cdp_url": f"/api/profiles/{profile_id}/cdp",
+                "cdp_url": f"/api/profiles/{profile_id}/cdp" if running.cdp_port is not None else None,
             }
         return {"status": "stopped", "vnc_ws_port": None, "display": None, "cdp_url": None}
 

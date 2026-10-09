@@ -95,7 +95,8 @@ async def test_active_displays_after_allocate(vnc: VNCManager):
 # ── start_vnc ────────────────────────────────────────────────────────────────
 
 
-def test_start_vnc_disables_kasmvnc_clipboard(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("gpu_device", [None, "/dev/dri/renderD128"])
+def test_start_vnc_disables_kasmvnc_clipboard(monkeypatch: pytest.MonkeyPatch, gpu_device):
     captured: dict[str, list[str]] = {}
 
     class FakeProcess:
@@ -114,10 +115,14 @@ def test_start_vnc_disables_kasmvnc_clipboard(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(vnc_manager_module.asyncio, "sleep", fake_sleep)
 
     manager = VNCManager()
-    asyncio.run(manager.start_vnc(display=100, ws_port=6100))
+    asyncio.run(manager.start_vnc(display=100, ws_port=6100, gpu_device=gpu_device))
 
     assert "-SendCutText=0" in captured["cmd"]
     assert "-AcceptCutText=0" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("-publicIP") + 1] == "127.0.0.1"
+    assert ("-hw3d" in captured["cmd"]) == (gpu_device is not None)
+    if gpu_device:
+        assert captured["cmd"][captured["cmd"].index("-drinode") + 1] == gpu_device
 
 
 # ── BrowserManager.get_status ────────────────────────────────────────────────

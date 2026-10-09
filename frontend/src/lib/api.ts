@@ -2,9 +2,16 @@
  * API client for CloakBrowser Manager backend.
  */
 
+export type BrowserType = "cloakbrowser" | "chromium" | "firefox" | "camoufox";
+
 export interface Profile {
   id: string;
   name: string;
+  browser_type: BrowserType;
+  use_gpu: boolean;
+  keepassxc_enabled: boolean | null;
+  firefox_preferences: Record<string, boolean | number | string>;
+  camoufox_config: Record<string, unknown>;
   fingerprint_seed: number;
   proxy: string | null;
   timezone: string | null;
@@ -36,6 +43,11 @@ export interface Profile {
 
 export interface ProfileCreateData {
   name: string;
+  browser_type?: BrowserType;
+  use_gpu?: boolean;
+  keepassxc_enabled?: boolean | null;
+  firefox_preferences?: Record<string, boolean | number | string>;
+  camoufox_config?: Record<string, unknown>;
   fingerprint_seed?: number | null;
   proxy?: string | null;
   timezone?: string | null;
@@ -75,6 +87,13 @@ export interface SystemStatus {
 
 export interface KeePassXCWindowResult {
   state: "shown" | "minimized";
+}
+
+export interface ProfileFileEntry {
+  name: string;
+  path: string;
+  is_directory: boolean;
+  size: number | null;
 }
 
 class ApiError extends Error {
@@ -134,7 +153,7 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  updateProfile: (id: string, data: Partial<ProfileCreateData>) =>
+  updateProfile: (id: string, data: Partial<Omit<ProfileCreateData, "browser_type">>) =>
     request<Profile>(`/api/profiles/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
@@ -156,12 +175,26 @@ export const api = {
 
   getStatus: () => request<SystemStatus>("/api/status"),
 
+  listFiles: (id: string, path = "") =>
+    request<{ path: string; entries: ProfileFileEntry[] }>(`/api/profiles/${id}/files?path=${encodeURIComponent(path)}`),
+
+  uploadFile: (id: string, path: string, file: File) =>
+    request<{ name: string; size: number }>(`/api/profiles/${id}/files/upload?path=${encodeURIComponent(path)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    }),
+
+  downloadFileUrl: (id: string, path: string) =>
+    `/api/profiles/${id}/files/download?path=${encodeURIComponent(path)}`,
+
   setClipboard: (id: string, text: string) =>
     request<{ ok: boolean }>(`/api/profiles/${id}/clipboard`, {
       method: "POST",
       body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(10_000),
     }),
 
   getClipboard: (id: string) =>
-    request<{ text: string }>(`/api/profiles/${id}/clipboard`),
+    request<{ text: string }>(`/api/profiles/${id}/clipboard`, { signal: AbortSignal.timeout(10_000) }),
 };

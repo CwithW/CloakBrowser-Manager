@@ -42,6 +42,7 @@ class VNCManager:
         ws_port: int,
         width: int = 1920,
         height: int = 1080,
+        gpu_device: str | None = None,
     ) -> subprocess.Popen:
         """Start Xvnc (KasmVNC) on the given display."""
         xvnc_bin = shutil.which("Xvnc") or "Xvnc"
@@ -60,6 +61,9 @@ class VNCManager:
             "-SecurityTypes", "None",
             "-DisableBasicAuth",
             "-interface", "127.0.0.1",  # internal only, proxied by FastAPI
+            # noVNC uses our WebSocket proxy, not Kasm's UDP negotiation.
+            # Skip external STUN lookups, which can block X11 startup for 40s.
+            "-publicIP", "127.0.0.1",
             "-AlwaysShared",
             # Disable KasmVNC clipboard transport so private BinaryClipboard
             # server messages (type 180) never reach noVNC. Clipboard sync is
@@ -68,6 +72,8 @@ class VNCManager:
             "-AcceptCutText=0",
             "-httpd", httpd_dir,
         ]
+        if gpu_device:
+            cmd.extend(["-hw3d", "-drinode", gpu_device])
 
         log_path = f"/tmp/xvnc-{display}.log"
         logger.info("Starting Xvnc on :%d (ws_port=%d) log=%s", display, ws_port, log_path)
@@ -112,6 +118,9 @@ class VNCManager:
                 )
             except subprocess.TimeoutExpired:
                 instance.process.kill()
+                await asyncio.get_event_loop().run_in_executor(
+                    None, instance.process.wait,
+                )
 
     async def cleanup_all(self):
         """Kill all managed Xvnc processes. Called on shutdown."""

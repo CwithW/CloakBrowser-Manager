@@ -335,6 +335,7 @@ def test_set_clipboard_success(app_client: TestClient):
 
     # Inject mock running profile
     mock_running = MagicMock(spec=RunningProfile)
+    mock_running.profile_id = pid
     mock_running.display = 100
     mock_running.cdp_port = 5100
     main.browser_mgr.running[pid] = mock_running
@@ -374,7 +375,11 @@ def test_get_clipboard_from_page(app_client: TestClient):
     mock_running.context = mock_context
     main.browser_mgr.running[pid] = mock_running
 
-    resp = app_client.get(f"/api/profiles/{pid}/clipboard")
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 1
+    mock_proc.communicate.return_value = (b"", b"")
+    with patch("backend.main.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc):
+        resp = app_client.get(f"/api/profiles/{pid}/clipboard")
     assert resp.status_code == 200
     assert resp.json()["text"] == "copied text"
 

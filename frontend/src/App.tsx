@@ -5,10 +5,11 @@ import { api, setOnUnauthorized, type ProfileCreateData } from "./lib/api";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
 import { ProfileViewer } from "./components/ProfileViewer";
+import { ProfileFiles } from "./components/ProfileFiles";
 import { LaunchButton } from "./components/LaunchButton";
 import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
-import { hasKeepassxcExtension } from "./lib/keepassxc";
+import { isKeepassxcEnabled } from "./lib/keepassxc";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "empty" | "create" | "edit" | "view";
@@ -94,6 +95,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>("empty");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [filesOpen, setFilesOpen] = useState(false);
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
 
@@ -154,6 +156,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
 
   return (
     <div className="h-screen flex">
+      {filesOpen && selected && <ProfileFiles profileId={selected.id} onClose={() => setFilesOpen(false)} />}
       {/* Sidebar */}
       {sidebarOpen && (
         <div className="w-64 border-r border-border bg-surface-1 flex-shrink-0">
@@ -234,6 +237,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
           {view === "edit" && selected && (
             <ProfileForm
               profile={selected}
+              onFiles={() => setFilesOpen(true)}
               onSave={handleUpdate}
               onDelete={handleDelete}
               onCancel={() => {
@@ -249,7 +253,8 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               profileId={selected.id}
               cdpUrl={selected.cdp_url}
               clipboardSync={selected.clipboard_sync}
-              keepassxcEnabled={hasKeepassxcExtension(selected.launch_args)}
+              keepassxcEnabled={isKeepassxcEnabled(selected)}
+              onFiles={() => setFilesOpen(true)}
               onDisconnect={handleVncDisconnect}
             />
           )}

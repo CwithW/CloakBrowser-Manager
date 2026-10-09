@@ -1,0 +1,6 @@
+# Optional override: use only on hosts with /dev/dri.
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+services:
+  manager:
+    devices:
+      - /dev/dri:/dev/dri

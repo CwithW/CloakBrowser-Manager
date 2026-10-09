@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ClipboardCopy, Code2, Download, KeyRound, Maximize2, Minimize2, Upload } from "lucide-react";
+import { ArrowLeft, ClipboardCopy, Code2, Download, Folder, KeyRound, Maximize2, Minimize2, Upload } from "lucide-react";
 import { api } from "../lib/api";
 
 interface ProfileViewerProps {
@@ -8,6 +8,7 @@ interface ProfileViewerProps {
   clipboardSync: boolean;
   keepassxcEnabled: boolean;
   onDisconnect: () => void;
+  onFiles?: () => void;
 }
 
 // X11 keysym for V key (Ctrl is already held in VNC by the time we intercept)
@@ -15,14 +16,15 @@ const XK_v = 0x0076;
 type ClipboardActionState = "idle" | "busy" | "success" | "error";
 type KeePassXCWindowState = "unknown" | "shown" | "minimized";
 
-function isClipboardPermissionError(err: unknown) {
-  const name = err instanceof DOMException ? err.name : "";
-  const message = err instanceof Error ? err.message : String(err);
-  return (
-    name === "NotAllowedError" ||
-    name === "SecurityError" ||
-    /clipboard read operation is not allowed|permission|denied/i.test(message)
-  );
+async function clipboardWithTimeout<T>(action: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([action, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Clipboard access timed out")), 10_000);
+    })]);
+  } finally {
+    clearTimeout(timer!);
+  }
 }
 
 export function ProfileViewer({
@@ -31,6 +33,7 @@ export function ProfileViewer({
   clipboardSync: initialClipboardSync,
   keepassxcEnabled,
   onDisconnect,
+  onFiles,
 }: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<any>(null);
@@ -110,13 +113,11 @@ export function ProfileViewer({
     if (!container || !clipboardSync || !connected) return;
 
     const handleKeyDown = async (e: KeyboardEvent) => {
-      console.log("[clipboard] keydown:", e.key, "ctrl:", e.ctrlKey, "meta:", e.metaKey, "clipboardSync:", true);
 
       const isPaste =
         e.key === "v" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey;
       if (!isPaste) return;
 
-      console.log("[clipboard] intercepted Ctrl+V");
 
       // Block noVNC from sending the keystroke before clipboard is updated
       e.stopPropagation();
@@ -124,27 +125,21 @@ export function ProfileViewer({
 
       const rfb = rfbRef.current;
       if (!rfb) {
-        console.log("[clipboard] no rfb ref, aborting");
         return;
       }
 
       try {
-        const text = await navigator.clipboard.readText();
-        console.log("[clipboard] host clipboard text:", text?.substring(0, 50), "len:", text?.length);
+        const text = await clipboardWithTimeout(navigator.clipboard.readText());
         if (text) {
-          console.log("[clipboard] calling setClipboard API...");
           await api.setClipboard(profileId, text);
-          console.log("[clipboard] setClipboard API success");
         }
       } catch (err) {
         console.warn("[clipboard] error:", err);
-        setClipboardSync(false);
         return;
       }
 
       // Send full Ctrl+V sequence to VNC. We can't rely on Ctrl still being
       // held because the user may have released it during the async API call.
-      console.log("[clipboard] sending Ctrl+V to VNC");
       rfb.sendKey(0xffe3, "ControlLeft", true);   // Ctrl press
       rfb.sendKey(XK_v, "KeyV", true);             // V press
       rfb.sendKey(XK_v, "KeyV", false);            // V release
@@ -161,25 +156,20 @@ export function ProfileViewer({
   // private BinaryClipboard type 180 messages from reaching noVNC.
   useEffect(() => {
     const rfb = rfbRef.current;
-    console.log("[clipboard] VNC→Host effect: rfb=", !!rfb, "sync=", clipboardSync, "connected=", connected);
     if (!rfb || !clipboardSync || !connected) return;
 
     const handleClipboard = (e: any) => {
       const text = e.detail?.text;
-      console.log("[clipboard] VNC→Host event fired, text:", text?.substring(0, 50), "len:", text?.length);
       if (text) {
         navigator.clipboard.writeText(text).then(() => {
-          console.log("[clipboard] writeText success");
         }).catch((err) => {
           console.warn("[clipboard] writeText failed:", err);
         });
       }
     };
 
-    console.log("[clipboard] registering clipboard event listener on rfb");
     rfb.addEventListener("clipboard", handleClipboard);
     return () => {
-      console.log("[clipboard] removing clipboard event listener");
       rfb.removeEventListener("clipboard", handleClipboard);
     };
   }, [clipboardSync, connected]);
@@ -191,30 +181,26 @@ export function ProfileViewer({
 
     let cancelled = false;
     let lastText = "";
+    let timer: ReturnType<typeof setTimeout>;
 
     const poll = async () => {
       if (cancelled) return;
       try {
         const { text } = await api.getClipboard(profileId);
-        if (text && text !== lastText) {
+        if (!cancelled && text && text !== lastText) {
+          await clipboardWithTimeout(navigator.clipboard.writeText(text));
           lastText = text;
-          console.log("[clipboard] poll: new VNC clipboard:", text.substring(0, 50), "len:", text.length);
-          await navigator.clipboard.writeText(text).catch((err) =>
-            console.warn("[clipboard] poll writeText failed:", err)
-          );
         }
       } catch (err) {
-        console.warn("[clipboard] poll error, stopping:", err);
-        cancelled = true;
-        return;
+        console.warn("[clipboard] poll failed; retrying:", err);
       }
       if (!cancelled) {
-        setTimeout(poll, 2000);
+        timer = setTimeout(poll, 2000);
       }
     };
 
     // Start polling after a short delay
-    const timer = setTimeout(poll, 2000);
+    timer = setTimeout(poll, 2000);
     return () => {
       cancelled = true;
       clearTimeout(timer);
@@ -259,15 +245,10 @@ export function ProfileViewer({
         if (!navigator.clipboard?.readText) {
           throw new Error("Clipboard API is not available");
         }
-        text = await navigator.clipboard.readText();
+        text = await clipboardWithTimeout(navigator.clipboard.readText());
       } catch (err) {
-        if (isClipboardPermissionError(err)) {
-          console.debug("[clipboard] manual set cancelled or denied:", err);
-          settleActionState(setSetClipboardState, "idle");
-          return;
-        }
         console.warn("[clipboard] manual set readText unavailable:", err);
-        const fallback = window.prompt("Paste text to send to CloakBrowser clipboard", "");
+        const fallback = window.prompt("Paste text to send to browser clipboard", "");
         if (fallback === null) {
           settleActionState(setSetClipboardState, "idle");
           return;
@@ -276,11 +257,6 @@ export function ProfileViewer({
       }
 
       await api.setClipboard(profileId, text);
-      try {
-        rfbRef.current?.clipboardPasteFrom?.(text);
-      } catch (err) {
-        console.warn("[clipboard] noVNC clipboardPasteFrom failed:", err);
-      }
       settleActionState(setSetClipboardState, "success");
     } catch (err) {
       console.warn("[clipboard] manual set failed:", err);
@@ -293,10 +269,10 @@ export function ProfileViewer({
     try {
       const { text } = await api.getClipboard(profileId);
       try {
-        await navigator.clipboard.writeText(text);
+        await clipboardWithTimeout(navigator.clipboard.writeText(text));
       } catch (err) {
         console.warn("[clipboard] manual read writeText failed:", err);
-        window.prompt("Copy CloakBrowser clipboard text", text);
+        window.prompt("Copy browser clipboard text", text);
       }
       settleActionState(setReadClipboardState, "success");
     } catch (err) {
@@ -343,6 +319,7 @@ export function ProfileViewer({
         <div className="text-center">
           <p className="text-red-400 text-sm mb-2">Connection failed</p>
           <p className="text-gray-500 text-xs">{error}</p>
+          <button type="button" onClick={onDisconnect} className="btn-secondary mt-3">Back to profile settings</button>
         </div>
       </div>
     );
@@ -353,12 +330,14 @@ export function ProfileViewer({
       {/* Toolbar */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-surface-1 border-b border-border">
         <div className="flex items-center gap-2">
+          <button type="button" onClick={onDisconnect} className="btn-secondary p-1" title="Back to profile settings" aria-label="Back to profile settings"><ArrowLeft className="h-4 w-4" /></button>
           <span className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-yellow-400 animate-pulse"}`} />
           <span className="text-xs text-gray-400">
             {connected ? "Connected" : "Connecting..."}
           </span>
         </div>
         <div className="flex items-center gap-1">
+          {onFiles && <button type="button" onClick={onFiles} className="p-1 text-gray-500 hover:text-gray-300" title="Browser files" aria-label="Browser files"><Folder className="h-4 w-4" /></button>}
           {keepassxcEnabled && (
             <button
               onClick={handleToggleKeePassXC}
@@ -408,7 +387,7 @@ export function ProfileViewer({
             </button>
           )}
           <button
-            onClick={() => { console.log("[clipboard] toggle:", !clipboardSync); setClipboardSync(!clipboardSync); }}
+            onClick={() => { setClipboardSync(!clipboardSync); }}
             className={`p-1 ${clipboardSync ? "text-accent" : "text-gray-500 hover:text-gray-300"}`}
             title={clipboardSync ? "Disable clipboard sync" : "Enable clipboard sync"}
             disabled={!connected}

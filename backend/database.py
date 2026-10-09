@@ -78,6 +78,16 @@ def init_db():
         if "auto_launch" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN auto_launch BOOLEAN DEFAULT 0")
             conn.commit()
+        for name, definition in (
+            ("browser_type", "TEXT NOT NULL DEFAULT 'cloakbrowser'"),
+            ("use_gpu", "BOOLEAN NOT NULL DEFAULT 1"),
+            ("keepassxc_enabled", "BOOLEAN"),
+            ("firefox_preferences", "TEXT NOT NULL DEFAULT '{}'"),
+            ("camoufox_config", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
+        conn.commit()
 
 
 def _now() -> str:
@@ -102,8 +112,9 @@ def create_profile(
                 user_agent, screen_width, screen_height, gpu_vendor, gpu_renderer,
                 hardware_concurrency, humanize, human_preset, headless, geoip,
                 clipboard_sync, auto_launch, color_scheme, launch_args, notes,
-                user_data_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                user_data_dir, created_at, updated_at, browser_type, use_gpu,
+                keepassxc_enabled, firefox_preferences, camoufox_config
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 profile_id, name, seed,
                 fields.get("proxy"),
@@ -126,6 +137,11 @@ def create_profile(
                 json.dumps(fields.get("launch_args") or []),
                 fields.get("notes"),
                 user_data_dir, now, now,
+                fields.get("browser_type", "cloakbrowser"),
+                fields.get("use_gpu", True),
+                fields.get("keepassxc_enabled", True if fields.get("browser_type", "cloakbrowser") != "cloakbrowser" else None),
+                json.dumps(fields.get("firefox_preferences") or {}),
+                json.dumps(fields.get("camoufox_config") or {}),
             ),
         )
         for t in tags:
@@ -145,6 +161,8 @@ def get_profile(profile_id: str) -> dict[str, Any] | None:
             return None
         profile = dict(row)
         profile["launch_args"] = json.loads(profile.get("launch_args") or "[]")
+        for name in ("firefox_preferences", "camoufox_config"):
+            profile[name] = json.loads(profile.get(name) or "{}")
         tags = conn.execute(
             "SELECT tag, color FROM profile_tags WHERE profile_id = ?",
             (profile_id,),
@@ -160,6 +178,8 @@ def list_profiles() -> list[dict[str, Any]]:
         for row in rows:
             profile = dict(row)
             profile["launch_args"] = json.loads(profile.get("launch_args") or "[]")
+            for name in ("firefox_preferences", "camoufox_config"):
+                profile[name] = json.loads(profile.get(name) or "{}")
             tags = conn.execute(
                 "SELECT tag, color FROM profile_tags WHERE profile_id = ?",
                 (profile["id"],),
@@ -170,6 +190,8 @@ def list_profiles() -> list[dict[str, Any]]:
 
 
 def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
+    if "browser_type" in fields:
+        raise ValueError("browser_type cannot be changed after profile creation")
     existing = get_profile(profile_id)
     if not existing:
         return None
@@ -182,12 +204,16 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
     # Pre-serialize launch_args to JSON before the generic update loop
     if "launch_args" in fields:
         fields["launch_args"] = json.dumps(fields["launch_args"] or [])
+    for name in ("firefox_preferences", "camoufox_config"):
+        if name in fields:
+            fields[name] = json.dumps(fields[name] or {})
 
     for col in (
         "name", "fingerprint_seed", "proxy", "timezone", "locale", "platform",
         "user_agent", "screen_width", "screen_height", "gpu_vendor", "gpu_renderer",
         "hardware_concurrency", "humanize", "human_preset", "headless", "geoip",
         "clipboard_sync", "auto_launch", "color_scheme", "launch_args", "notes",
+        "use_gpu", "keepassxc_enabled", "firefox_preferences", "camoufox_config",
     ):
         if col in fields:
             update_cols.append(f"{col} = ?")

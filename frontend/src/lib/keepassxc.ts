@@ -5,6 +5,17 @@ export const KEEPASSXC_EXTENSION_ARG =
 export const KEEPASSXC_EXTENSION_ALLOW_ARG =
   `--disable-extensions-except=${KEEPASSXC_EXTENSION_PATH}`;
 
+export function isKeepassxcEnabled(profile: {
+  browser_type?: string;
+  keepassxc_enabled?: boolean | null;
+  launch_args?: string[] | null;
+}) {
+  return profile.keepassxc_enabled ?? (
+    profile.browser_type !== undefined && profile.browser_type !== "cloakbrowser"
+      ? true : hasKeepassxcExtension(profile.launch_args)
+  );
+}
+
 export function hasKeepassxcExtension(launchArgs: string[] | null | undefined) {
   const args = launchArgs ?? [];
   for (let index = 0; index < args.length; index += 1) {

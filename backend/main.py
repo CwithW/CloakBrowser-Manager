@@ -25,6 +25,7 @@ import starlette.requests
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import database as db
+from .profile_files import router as files_router
 from .browser_manager import (
     BrowserLaunchError,
     BrowserManager,
@@ -351,6 +352,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="CloakBrowser Manager", lifespan=lifespan)
 app.add_middleware(AuthMiddleware)
+app.include_router(files_router)
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
@@ -509,7 +511,7 @@ async def launch_profile(profile_id: str):
         status="running",
         vnc_ws_port=running.ws_port,
         display=f":{running.display}",
-        cdp_url=f"/api/profiles/{profile_id}/cdp",
+        cdp_url=f"/api/profiles/{profile_id}/cdp" if running.cdp_port is not None else None,
     )
 
 
@@ -568,94 +570,30 @@ async def get_system_status():
 
 # ── Clipboard Relay ──────────────────────────────────────────────────────────
 
-_CLIPBOARD_MAX_READ = 1_048_576  # 1MB cap on GET response
-
-# Track xclip processes per display so we can kill the old one before spawning new
-_xclip_procs: dict[int, asyncio.subprocess.Process] = {}
-
-
 @app.post("/api/profiles/{profile_id}/clipboard")
 async def set_clipboard(profile_id: str, body: ClipboardRequest):
-    """Push text into the VNC session's X clipboard via xclip."""
+    """Push text into the VNC session's X11 clipboard with a bounded write."""
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
-
-    import os
-
-    # Kill previous xclip for this display (it stays alive to serve paste)
-    old = _xclip_procs.pop(running.display, None)
-    if old and old.returncode is None:
-        old.kill()
-        await old.wait()
-
-    env = {**os.environ, "DISPLAY": f":{running.display}"}
-    proc = await asyncio.create_subprocess_exec(
-        "xclip", "-selection", "clipboard",
-        stdin=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    # xclip reads stdin then stays alive to serve paste requests.
-    proc.stdin.write(body.text.encode())  # type: ignore[union-attr]
-    await proc.stdin.drain()  # type: ignore[union-attr]
-    proc.stdin.close()  # type: ignore[union-attr]
-
-    _xclip_procs[running.display] = proc
-
+    try:
+        await browser_mgr.clipboard.set(running, body.text)
+    except (asyncio.TimeoutError, OSError, RuntimeError) as exc:
+        logger.warning("Clipboard write failed for %s: %s", profile_id, exc)
+        raise HTTPException(status_code=503, detail="Clipboard unavailable; retry or reconnect to the profile") from exc
     return {"ok": True}
 
 
 @app.get("/api/profiles/{profile_id}/clipboard")
 async def get_clipboard(profile_id: str):
-    """Read the VNC session's clipboard.
-
-    Chrome doesn't write to X11 clipboard under KasmVNC, so xclip can't read it.
-    Instead, read via Playwright's CDP connection to Chrome (navigator.clipboard.readText).
-    Falls back to xclip for non-Chrome clipboard owners.
-    """
+    """Read X11 first, with a bounded browser fallback for Chromium builds."""
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
-
-    # Read Chrome's current text selection via Playwright.
-    # Chrome's native copy (via VNC Ctrl+C) doesn't write to X11 clipboard
-    # and doesn't fire DOM events, so we read the visible selection instead.
-    # The init script also captures copy events when they do fire.
-    # Check all pages — user may have copied in any tab
     try:
-        for page in running.context.pages:
-            try:
-                text = await page.evaluate("window.__clipboardText || ''")
-                if text:
-                    return {"text": text[:_CLIPBOARD_MAX_READ]}
-            except Exception as exc:
-                logger.debug("Clipboard read failed on page: %s", exc)
-                continue
-    except Exception as exc:
-        logger.debug("Playwright clipboard read failed: %s", exc)
-
-    # Fallback: xclip for non-Chrome clipboard owners
-    import os
-
-    env = {**os.environ, "DISPLAY": f":{running.display}"}
-    proc = await asyncio.create_subprocess_exec(
-        "xclip", "-selection", "clipboard", "-o",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return {"text": ""}
-
-    if proc.returncode != 0:
-        return {"text": ""}
-
-    text = stdout[:_CLIPBOARD_MAX_READ].decode("utf-8", errors="replace")
-    return {"text": text}
+        return {"text": await browser_mgr.clipboard.read(running)}
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="Clipboard unavailable; retry or reconnect to the profile") from exc
 
 
 # ── VNC WebSocket Proxy ──────────────────────────────────────────────────────
@@ -824,6 +762,8 @@ async def cdp_info(profile_id: str):
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
+    if running.cdp_port is None:
+        raise HTTPException(status_code=400, detail="CDP is only available for CloakBrowser profiles")
     return {
         "cdp_url": f"/api/profiles/{profile_id}/cdp",
         "usage": "playwright.chromium.connect_over_cdp('http://<host>/api/profiles/"
@@ -838,6 +778,8 @@ async def cdp_json_version(profile_id: str, request: Request):
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
+    if running.cdp_port is None:
+        raise HTTPException(status_code=400, detail="CDP is only available for CloakBrowser profiles")
 
     try:
         async with httpx.AsyncClient() as client:
@@ -865,6 +807,8 @@ async def cdp_json_list(profile_id: str, request: Request):
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
+    if running.cdp_port is None:
+        raise HTTPException(status_code=400, detail="CDP is only available for CloakBrowser profiles")
 
     try:
         async with httpx.AsyncClient() as client:
@@ -957,6 +901,9 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
     if not running:
         await websocket.close(code=4004, reason="Profile not running")
         return
+    if running.cdp_port is None:
+        await websocket.close(code=4005, reason="CDP is only available for CloakBrowser profiles")
+        return
 
     await websocket.accept()
 
@@ -984,6 +931,9 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     running = browser_mgr.running.get(profile_id)
     if not running:
         await websocket.close(code=4004, reason="Profile not running")
+        return
+    if running.cdp_port is None:
+        await websocket.close(code=4005, reason="CDP is only available for CloakBrowser profiles")
         return
 
     await websocket.accept()

@@ -283,6 +283,8 @@ def test_ensure_keepassxc_config_enables_browser_and_preserves_settings(tmp_path
     assert "Enabled=true" in config
     assert "UpdateBinaryPath=false" in config
     assert "ShowNotification=false" in config
+    assert "UpdateCheckMessageShown=true" in config
+    assert "CheckForUpdates=false" in config
     assert "[Security]" in config
     assert "LockDatabaseIdle=false" in config
     assert "LockDatabaseMinimize=false" in config
@@ -369,6 +371,19 @@ async def test_cleanup_keepassxc_terminates_process_and_runtime(tmp_path: Path):
     process.terminate.assert_called_once()
     process.wait.assert_awaited_once()
     assert not runtime_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_keepassxc_readiness_waits_for_unlocked_database_window(tmp_path: Path):
+    manager = BrowserManager()
+    process = MagicMock(pid=4242, returncode=None)
+    paths = _test_keepassxc_paths(tmp_path)
+    manager._run_xdotool = AsyncMock(side_effect=[
+        (1, ""), (0, "passwords.kdbx [Locked] - KeePassXC"),
+        (0, "passwords.kdbx - KeePassXC"),
+    ])
+    await manager._wait_for_keepassxc_window_ready(process, paths, 123)
+    assert manager._run_xdotool.await_count == 3
 
 
 def _running_profile_with_keepassxc(tmp_path: Path) -> tuple[RunningProfile, MagicMock]:

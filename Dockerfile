@@ -8,6 +8,7 @@ ARG TARGETARCH
 ARG KEEPASSXC_VERSION=2.7.12
 ARG KEEPASSXC_APPIMAGE_SHA256=564fe8b751b9ef7aa057e4d3d0b2878db24eaa0f6b1c855c82e699ab0913ae49
 ARG KEEPASSXC_BROWSER_VERSION=1.9.7
+ARG KEEPASSXC_FIREFOX_SHA256=f4ecad9cabe70511fbff42fe4fe831c560cc3a0b6da10a740ce670f4f6597f42
 ARG DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
 ARG DEBIAN_SECURITY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian-security
 
@@ -30,6 +31,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm webext-keepassxc-browser_*.deb \
     && python -c \
         "import json; p='/keepassxc-browser-package/usr/share/chromium/extensions/keepassxc-browser/manifest.json'; assert json.load(open(p, encoding='utf-8'))['version'] == '${KEEPASSXC_BROWSER_VERSION}'"
+
+# Keep the signed persistent addon intact for both Firefox and Camoufox.
+RUN curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+        https://addons.mozilla.org/firefox/downloads/file/4441759/keepassxc_browser-1.9.7.xpi \
+        --output /keepassxc-browser-firefox.xpi \
+    && echo "${KEEPASSXC_FIREFOX_SHA256}  /keepassxc-browser-firefox.xpi" | sha256sum -c -
 
 RUN test "${TARGETARCH}" = "amd64" \
     || { echo "KeePassXC ${KEEPASSXC_VERSION} has no official Linux ${TARGETARCH} AppImage." >&2; exit 1; } \
@@ -75,6 +82,7 @@ RUN sed -i \
     libgdk-pixbuf-2.0-0 libxss1 libxtst6 fonts-liberation \
     libgl1 libgl1-mesa-dri libegl-mesa0 \
     procps wget ca-certificates xclip xdotool libgpg-error0 libusb-1.0-0 \
+    chromium firefox-esr tzdata mesa-va-drivers mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
 
 # Install the checksum-pinned official runtime. Small stable wrappers preserve
@@ -91,6 +99,8 @@ RUN chmod 755 /usr/bin/keepassxc /usr/bin/keepassxc-cli /usr/bin/keepassxc-proxy
 COPY docker/keepassxc-native-messaging.json /tmp/keepassxc-native-messaging.json
 COPY --from=keepassxc-assets /keepassxc-browser-package/usr/share/chromium/extensions/keepassxc-browser \
     /opt/cloakbrowser/extensions/keepassxc-browser
+COPY --from=keepassxc-assets /keepassxc-browser-firefox.xpi /opt/cloakbrowser/extensions/keepassxc-browser-firefox.xpi
+COPY docker/keepassxc-firefox-native-messaging.json /usr/lib/mozilla/native-messaging-hosts/org.keepassxc.keepassxc_browser.json
 RUN mkdir -p /opt/cloakbrowser/extensions \
     /etc/chromium/native-messaging-hosts \
     /etc/opt/chrome/native-messaging-hosts \
@@ -131,6 +141,11 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 # Pre-download CloakBrowser binary. This only depends on the installed
 # cloakbrowser package, so keep it before application code copies.
 RUN python -c "from cloakbrowser.download import ensure_binary; ensure_binary()"
+
+# Download Camoufox and its default addon/GeoIP assets during the build, so
+# launching a profile never needs to download a browser binary at runtime.
+RUN python -m camoufox fetch \
+    && python -c "from camoufox.utils import launch_options; launch_options(headless=True, geoip=False)"
 
 # Backend code
 COPY backend/ /app/backend/

@@ -1,6 +1,7 @@
 import { Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { Profile, ProfileCreateData } from "../lib/api";
+import type { BrowserType, Profile, ProfileCreateData } from "../lib/api";
+import { BROWSER_LABELS } from "../lib/browsers";
 import {
   KEEPASSXC_EXTENSION_ALLOW_ARG,
   KEEPASSXC_EXTENSION_ARG,
@@ -16,6 +17,7 @@ interface ProfileFormProps {
   onSave: (data: ProfileCreateData) => Promise<void>;
   onDelete?: () => Promise<void>;
   onCancel: () => void;
+  onFiles?: () => void;
 }
 
 const RESOLUTION_PRESETS: Record<string, { width: number; height: number }> = {
@@ -63,6 +65,8 @@ const GPU_PRESETS: Record<string, { vendor: string; renderer: string }> = {
 
 const DEFAULT_FORM: ProfileCreateData = {
   name: "",
+  browser_type: "cloakbrowser",
+  use_gpu: true,
   platform: "windows",
   screen_width: 1280,
   screen_height: 720,
@@ -80,7 +84,7 @@ const DEFAULT_FORM: ProfileCreateData = {
   tags: [],
 };
 
-export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileFormProps) {
+export function ProfileForm({ profile, onSave, onDelete, onCancel, onFiles }: ProfileFormProps) {
   const isEdit = profile !== null;
 
   const [form, setForm] = useState<ProfileCreateData>(DEFAULT_FORM);
@@ -90,10 +94,19 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
   const [tagInput, setTagInput] = useState("");
   const [tagColor, setTagColor] = useState<string | null>("#6366f1");
   const [launchArgInput, setLaunchArgInput] = useState("");
+  const [firefoxPrefs, setFirefoxPrefs] = useState("{}");
+  const [camoufoxConfig, setCamoufoxConfig] = useState("{}");
+  const [error, setError] = useState("");
+  const browserType = form.browser_type ?? "cloakbrowser";
+  const fingerprintBrowser = browserType === "cloakbrowser" || browserType === "camoufox";
+  const firefoxBrowser = browserType === "firefox" || browserType === "camoufox";
 
   useEffect(() => {
     setForm(profile ? {
       name: profile.name,
+      browser_type: profile.browser_type ?? "cloakbrowser",
+      use_gpu: profile.use_gpu ?? true,
+      keepassxc_enabled: profile.keepassxc_enabled,
       fingerprint_seed: profile.fingerprint_seed,
       proxy: profile.proxy,
       timezone: profile.timezone,
@@ -116,6 +129,9 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
       notes: profile.notes,
       tags: profile.tags ?? [],
     } : DEFAULT_FORM);
+    setFirefoxPrefs(JSON.stringify(profile?.firefox_preferences ?? {}, null, 2));
+    setCamoufoxConfig(JSON.stringify(profile?.camoufox_config ?? {}, null, 2));
+    setError("");
   }, [profile?.id]);
 
   const set = <K extends keyof ProfileCreateData>(key: K, value: ProfileCreateData[K]) => {
@@ -125,9 +141,29 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name.trim()) return;
+    let data = { ...form };
+    try {
+      const parseObject = (value: string) => {
+        const parsed = JSON.parse(value);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+          throw new Error("Advanced settings must be JSON objects.");
+        }
+        return parsed;
+      };
+      if (firefoxBrowser) data.firefox_preferences = parseObject(firefoxPrefs);
+      if (browserType === "camoufox") data.camoufox_config = parseObject(camoufoxConfig);
+    } catch {
+      setError("Advanced settings must contain a valid JSON object.");
+      return;
+    }
+    if (isEdit) {
+      const { browser_type: _type, ...updates } = data;
+      data = updates;
+    }
+    setError("");
     setSaving(true);
     try {
-      await onSave(form);
+      await onSave(data);
     } finally {
       setSaving(false);
     }
@@ -204,6 +240,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
           )}
         </div>
         <div className="flex items-center gap-2">
+          {isEdit && onFiles && <button type="button" onClick={onFiles} className="btn-secondary">Files</button>}
           <button type="button" onClick={onCancel} className="btn-secondary">
             Cancel
           </button>
@@ -215,10 +252,35 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
       </div>
 
       <div className="space-y-5">
+        {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
         {/* Basic */}
         <section>
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Basic</h3>
           <div className="grid grid-cols-2 gap-3">
+            <div className="col-span-2">
+              <label className="label" htmlFor="browser-type">Browser Type</label>
+              <select
+                id="browser-type"
+                className="input"
+                value={browserType}
+                disabled={isEdit}
+                onChange={(e) => {
+                  const type = e.target.value as BrowserType;
+                  setForm((prev) => ({
+                    ...prev, browser_type: type,
+                    platform: type === "chromium" || type === "firefox" ? "linux" : "windows",
+                    keepassxc_enabled: type === "cloakbrowser" ? null : true,
+                    humanize: type === "cloakbrowser" || type === "camoufox",
+                    headless: false,
+                    geoip: false,
+                    launch_args: type === "cloakbrowser" ? DEFAULT_FORM.launch_args : [],
+                  }));
+                }}
+              >
+                {Object.entries(BROWSER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">Browser type is fixed after creation.</p>
+            </div>
             <div className="col-span-2">
               <label className="label">Profile Name</label>
               <input
@@ -229,7 +291,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 required
               />
             </div>
-            <div>
+            {fingerprintBrowser && <div>
               <label className="label">Platform</label>
               <select
                 className="input"
@@ -240,8 +302,8 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 <option value="macos">macOS</option>
                 <option value="linux">Linux</option>
               </select>
-            </div>
-            <div>
+            </div>}
+            {fingerprintBrowser && <div>
               <label className="label">Fingerprint Seed</label>
               <div className="flex gap-2">
                 <input
@@ -283,7 +345,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                   </svg>
                 </button>
               </div>
-            </div>
+            </div>}
           </div>
         </section>
 
@@ -320,7 +382,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 />
               </div>
             </div>
-            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+            {fingerprintBrowser && <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
               <input
                 type="checkbox"
                 checked={form.geoip ?? false}
@@ -328,7 +390,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 className="rounded border-border bg-surface-2"
               />
               Auto-detect timezone/locale from proxy IP (GeoIP)
-            </label>
+            </label>}
           </div>
         </section>
 
@@ -377,7 +439,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 </div>
               </div>
             )}
-            <div>
+            {fingerprintBrowser && <div>
               <label className="label">Hardware Concurrency</label>
               <input
                 className="input"
@@ -386,8 +448,8 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 onChange={(e) => set("hardware_concurrency", e.target.value ? Number(e.target.value) : null)}
                 placeholder="Auto (from seed)"
               />
-            </div>
-            <div>
+            </div>}
+            {browserType === "cloakbrowser" && <div>
               <label className="label">GPU Preset</label>
               <select
                 className="input"
@@ -401,8 +463,8 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                   <option key={name} value={name}>{name}</option>
                 ))}
               </select>
-            </div>
-            <div>
+            </div>}
+            {fingerprintBrowser && <div>
               <label className="label">GPU Vendor</label>
               <input
                 className="input"
@@ -410,8 +472,8 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 onChange={(e) => set("gpu_vendor", e.target.value || null)}
                 placeholder="Auto (from seed)"
               />
-            </div>
-            <div>
+            </div>}
+            {fingerprintBrowser && <div>
               <label className="label">GPU Renderer</label>
               <input
                 className="input"
@@ -419,7 +481,11 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 onChange={(e) => set("gpu_renderer", e.target.value || null)}
                 placeholder="Auto (from seed)"
               />
-            </div>
+            </div>}
+            {browserType !== "cloakbrowser" && <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input type="checkbox" checked={form.use_gpu ?? true} onChange={(e) => set("use_gpu", e.target.checked)} />
+              Use GPU when available
+            </label>}
           </div>
         </section>
 
@@ -427,7 +493,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
         <section>
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Behavior</h3>
           <div className="space-y-3">
-            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+            {fingerprintBrowser && <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
               <input
                 type="checkbox"
                 checked={form.humanize ?? false}
@@ -435,8 +501,8 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 className="rounded border-border bg-surface-2"
               />
               Human-like mouse, keyboard, and scroll behavior
-            </label>
-            {form.humanize && (
+            </label>}
+            {browserType === "cloakbrowser" && form.humanize && (
               <div>
                 <label className="label">Human Preset</label>
                 <select
@@ -449,6 +515,14 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                 </select>
               </div>
             )}
+            {browserType !== "cloakbrowser" && <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input type="checkbox" checked={form.keepassxc_enabled ?? true} onChange={(e) => set("keepassxc_enabled", e.target.checked)} />
+              Enable KeePassXC-Browser
+            </label>}
+            {fingerprintBrowser && <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input type="checkbox" checked={form.headless ?? false} onChange={(e) => set("headless", e.target.checked)} />
+              Headless browser
+            </label>}
             <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
               <input
                 type="checkbox"
@@ -547,7 +621,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
         {/* Launch Args */}
         <section>
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Launch Args</h3>
-          <p className="text-xs text-gray-500 mb-2">Custom Chromium flags passed at launch (e.g. --load-extension, --disable-features)</p>
+          <p className="text-xs text-gray-500 mb-2">Custom {BROWSER_LABELS[browserType]} arguments passed at launch.</p>
           {(form.launch_args ?? []).length > 0 && (
             <div className="flex flex-wrap gap-1.5 mb-3">
               {(form.launch_args ?? []).map((arg, idx) => (
@@ -580,6 +654,17 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
             </button>
           </div>
         </section>
+
+        {firefoxBrowser && <section>
+          <label className="label" htmlFor="firefox-preferences">Firefox Preferences (JSON)</label>
+          {browserType === "firefox" && <p className="text-xs text-gray-500 mb-2">Strict tracking protection is enabled by default.</p>}
+          <textarea id="firefox-preferences" className="input min-h-[100px] font-mono" value={firefoxPrefs} onChange={(e) => setFirefoxPrefs(e.target.value)} />
+        </section>}
+        {browserType === "camoufox" && <section>
+          <label className="label" htmlFor="camoufox-config">Camoufox Fingerprint (JSON)</label>
+          <p className="text-xs text-gray-500 mb-2">Advanced fingerprint overrides. The generated identity is saved between launches.</p>
+          <textarea id="camoufox-config" className="input min-h-[100px] font-mono" value={camoufoxConfig} onChange={(e) => setCamoufoxConfig(e.target.value)} />
+        </section>}
 
         {/* Notes */}
         <section>
