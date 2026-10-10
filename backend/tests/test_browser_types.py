@@ -117,6 +117,30 @@ def test_chromium_locale_updates_existing_preferences_and_clears(tmp_path):
         assert not any(arg.startswith(("--lang=", "--remote-debugging", "--enable-automation")) for arg in command)
 
 
+@pytest.mark.parametrize("browser_type", ["firefox", "camoufox"])
+def test_firefox_family_keeps_english_ui_when_website_locale_changes(tmp_path, browser_type):
+    profile = {"browser_type": browser_type, "user_data_dir": str(tmp_path)}
+    # Existing manager preferences from before the UI/web language split.
+    engines._write_firefox_preferences(tmp_path, {
+        "intl.locale.requested": "ja", "intl.accept_languages": "ja",
+    })
+    path = tmp_path / "prefs.js"
+    path.write_text('user_pref("intl.locale.requested", "ja");\n'
+                    'user_pref("intl.accept_languages", "ja");\n'
+                    'user_pref("custom.setting", true);\n')
+    for locale in ("ja", "de-DE", None):
+        prefs = engines.firefox_preferences({**profile, "locale": locale}, None)
+        engines._write_firefox_preferences(tmp_path, prefs)
+        text = (tmp_path / "user.js").read_text()
+        assert 'user_pref("intl.locale.requested", "en-US");' in text
+        if locale:
+            assert f'user_pref("intl.accept_languages", "{locale}");' in text
+        else:
+            assert "intl.accept_languages" not in text
+            assert "intl.accept_languages" not in path.read_text()
+        assert 'user_pref("custom.setting", true);' in path.read_text()
+
+
 def test_gpu_only_for_non_cloakbrowser(monkeypatch):
     monkeypatch.setattr(Path, "glob", lambda *_: [Path("/dev/dri/renderD128")])
     monkeypatch.setattr(engines.os, "access", lambda *_: True)
@@ -185,6 +209,42 @@ def test_camoufox_generated_identity_persists_but_behavior_updates(tmp_path, mon
     assert second["user_data_dir"] == str(tmp_path)
     engines.camoufox_options({**profile, "fingerprint_seed": 43}, None, {}, False)
     assert calls[-1]["config"].get("navigator.userAgent") is None
+
+
+def test_camoufox_website_languages_replace_saved_fallbacks_without_changing_identity(tmp_path, monkeypatch):
+    calls = []
+    def launch_options(**kwargs):
+        calls.append(kwargs)
+        config = {**kwargs["config"]}
+        config.setdefault("navigator.userAgent", "persistent identity")
+        return {"env": {"CAMOU_CONFIG_1": json.dumps(config)}}
+    monkeypatch.setitem(sys.modules, "camoufox.utils", SimpleNamespace(launch_options=launch_options))
+    profile = {"browser_type": "camoufox", "user_data_dir": str(tmp_path), "locale": "ja"}
+    engines.camoufox_options(profile, None, {}, False)
+    path = tmp_path / "camoufox-fingerprint.json"
+    saved = json.loads(path.read_text())
+    saved["config"]["locale:all"] = "ja,en-US,en"
+    path.write_text(json.dumps(saved))
+    stored = tmp_path / "prefs.js"
+    stored.write_text('user_pref("intl.accept_languages", "ja");\n'
+                      'user_pref("custom.setting", true);\n')
+    for locale in ("ja", "de-DE", None):
+        engines.camoufox_options({**profile, "locale": locale}, None, {}, False)
+        config = calls[-1]["config"]
+        assert config["navigator.userAgent"] == "persistent identity"
+        if locale:
+            assert config["locale:all"] == locale
+        else:
+            assert "locale:all" not in config
+            assert "intl.accept_languages" not in stored.read_text()
+            assert "intl.accept_languages" not in (tmp_path / "user.js").read_text()
+        assert 'user_pref("custom.setting", true);' in stored.read_text()
+        prefs = calls[-1]["firefox_user_prefs"]
+        assert prefs["intl.locale.requested"] == "en-US"
+        assert prefs["intl.regional_prefs.use_os_locales"] is True
+        assert "intl.accept_languages" not in prefs
+    engines.camoufox_options({**profile, "camoufox_config": {"locale:all": "ja,fr"}}, None, {}, False)
+    assert calls[-1]["config"]["locale:all"] == "ja,fr"
 
 
 @pytest.mark.parametrize("fonts", [None, [], ["Arimo", "Tinos", "Cousine"]])

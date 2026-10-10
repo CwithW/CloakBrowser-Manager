@@ -75,6 +75,9 @@ def firefox_preferences(profile: dict[str, Any], proxy: str | None) -> dict[str,
         "browser.startup.page": 0,
         "browser.warnOnQuit": False,
         "browser.tabs.warnOnClose": False,
+        # The application locale controls browser chrome, independently of
+        # website languages and Camoufox's locale fingerprint.
+        "intl.locale.requested": "en-US",
         "app.update.auto": False,
         "app.update.enabled": False,
         "app.update.background.scheduling.enabled": False,
@@ -99,9 +102,12 @@ def firefox_preferences(profile: dict[str, Any], proxy: str | None) -> dict[str,
             "privacy.query_stripping.enabled": True,
             "privacy.globalprivacycontrol.enabled": True,
         })
+    elif profile.get("browser_type") == "camoufox":
+        # Keep the engine's configured regional locale for Intl even when
+        # it differs from the English application locale.
+        prefs["intl.regional_prefs.use_os_locales"] = True
     if profile.get("locale"):
         prefs["intl.accept_languages"] = profile["locale"]
-        prefs["intl.locale.requested"] = profile["locale"]
     if profile.get("user_agent"):
         prefs["general.useragent.override"] = profile["user_agent"]
     scheme = profile.get("color_scheme")
@@ -176,6 +182,15 @@ def _proxy_auth_extension(directory: Path, proxy: str, *, firefox: bool) -> Path
     return directory
 
 
+def _remove_firefox_preferences(path: Path, keys: set[str]) -> None:
+    if not keys or not path.exists():
+        return
+    def keep(line: str) -> bool:
+        match = re.match(r'user_pref\(("(?:[^"\\]|\\.)*")\s*,', line)
+        return not match or json.loads(match[1]) not in keys
+    path.write_text("\n".join(line for line in path.read_text().splitlines() if keep(line)) + "\n")
+
+
 def _write_firefox_preferences(directory: Path, prefs: dict[str, Any]) -> None:
     """Replace our own user.js block and preserve all user-supplied lines."""
     path = directory / "user.js"
@@ -189,13 +204,7 @@ def _write_firefox_preferences(directory: Path, prefs: dict[str, Any]) -> None:
         removed = old_keys - prefs.keys()
         # Firefox persists user.js settings into prefs.js. Clearing a managed
         # option must also clear that persisted value, without touching others.
-        stored = directory / "prefs.js"
-        if removed and stored.exists():
-            lines = stored.read_text().splitlines()
-            def keep(line: str) -> bool:
-                match = re.match(r'user_pref\(("(?:[^"\\]|\\.)*")\s*,', line)
-                return not match or json.loads(match[1]) not in removed
-            stored.write_text("\n".join(line for line in lines if keep(line)) + "\n")
+        _remove_firefox_preferences(directory / "prefs.js", removed)
     lines = [f"user_pref({json.dumps(key)}, {json.dumps(value)});" for key, value in prefs.items()]
     path.write_text(existing.rstrip() + "\n" + start + "\n" + "\n".join(lines) + "\n" + end + "\n")
 
@@ -539,6 +548,8 @@ def camoufox_options(profile: dict[str, Any], proxy: str | None, env: dict[str, 
     config = saved.get("config", {}).copy() if saved.get("identity") == identity else {}
     if saved.get("locale") != profile.get("locale"):
         config = {key: value for key, value in config.items() if not key.startswith("locale:") and key not in {"navigator.language", "navigator.languages", "headers.Accept-Language"}}
+    if profile.get("locale"):
+        config["locale:all"] = profile["locale"]
     config.update(profile.get("camoufox_config") or {})
     config.update({"screen.width": profile.get("screen_width", 1920), "screen.height": profile.get("screen_height", 1080)})
     # The virtual desktop has no reserved taskbar. Supply the full available
@@ -568,6 +579,20 @@ def camoufox_options(profile: dict[str, Any], proxy: str | None, env: dict[str, 
         raise ValueError("Use the debugging toggles rather than custom remote-control arguments.")
     if profile.get("remote_debugging_port"):
         args.append(f"--remote-debugging-port={profile['remote_debugging_port']}")
+    prefs = firefox_preferences(profile, None)
+    if "intl.accept_languages" not in prefs:
+        # Camoufox's startup hook persists this preference outside our block.
+        # Clearing Locale must remove it from both sources before startup.
+        for name in ("prefs.js", "user.js"):
+            _remove_firefox_preferences(directory / name, {"intl.accept_languages"})
+    # Replace preferences left by earlier native/BiDi launches before Gecko
+    # reads user.js; SDK default-branch preferences cannot override them.
+    _write_firefox_preferences(directory, prefs)
+    if "intl.accept_languages" not in (profile.get("firefox_preferences") or {}):
+        # Camoufox applies SDK prefs to Gecko's default branch. A website
+        # language equal to that default falls back to the UI language list.
+        # Its native locale:all startup hook sets the user preference instead.
+        prefs.pop("intl.accept_languages", None)
     options = launch_options(
         config=config, os=profile.get("platform", "windows"),
         webgl_config=(profile["gpu_vendor"], profile["gpu_renderer"]) if profile.get("gpu_vendor") else None,
@@ -575,7 +600,7 @@ def camoufox_options(profile: dict[str, Any], proxy: str | None, env: dict[str, 
         geoip=bool(profile.get("geoip")), locale=profile.get("locale") or None,
         proxy=playwright_proxy(proxy), env=browser_environment(profile, env),
         addons=[],
-        firefox_user_prefs=firefox_preferences(profile, None),
+        firefox_user_prefs=prefs,
         window=(profile.get("screen_width", 1920), profile.get("screen_height", 1080)),
         args=args,
         i_know_what_im_doing=True,
