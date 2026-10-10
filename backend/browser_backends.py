@@ -223,10 +223,15 @@ def native_command(profile: dict[str, Any], proxy: str | None, keepassxc: bool) 
         data = json.loads(preferences.read_text()) if preferences.exists() else {}
         data.setdefault("download", {})["default_directory"] = str(profile_home(profile) / "Downloads")
         if profile.get("locale"):
-            command.append(f"--lang={profile['locale']}")
-            data.setdefault("intl", {})["accept_languages"] = profile["locale"]
+            # Chromium derives accept_languages from selected_languages on
+            # startup. Update both so existing profiles cannot restore their
+            # previous language. These prefs leave the UI language unchanged.
+            languages = data.setdefault("intl", {})
+            languages["selected_languages"] = profile["locale"]
+            languages["accept_languages"] = profile["locale"]
         else:
-            data.get("intl", {}).pop("accept_languages", None)
+            for key in ("selected_languages", "accept_languages"):
+                data.get("intl", {}).pop(key, None)
         webrtc_extension = chromium_policy(profile, data)
         preferences.parent.mkdir(exist_ok=True)
         preferences.write_text(json.dumps(data))

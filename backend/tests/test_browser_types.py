@@ -96,6 +96,27 @@ def test_firefox_managed_preferences_preserve_user_js(tmp_path):
     assert "zh-TW" not in text
 
 
+def test_chromium_locale_updates_existing_preferences_and_clears(tmp_path):
+    path = tmp_path / "Default" / "Preferences"
+    path.parent.mkdir()
+    path.write_text(json.dumps({
+        "intl": {"selected_languages": "en-US,en", "accept_languages": "en-US,en", "unrelated": True},
+        "bookmark_bar": {"show_on_all_tabs": True},
+    }))
+    profile = {"browser_type": "chromium", "user_data_dir": str(tmp_path)}
+    for locale in ("ja", "de-DE", None):
+        command = engines.native_command({**profile, "locale": locale}, None, False)
+        data = json.loads(path.read_text())
+        for key in ("selected_languages", "accept_languages"):
+            if locale:
+                assert data["intl"][key] == locale
+            else:
+                assert key not in data["intl"]
+        assert data["intl"]["unrelated"] is True
+        assert data["bookmark_bar"] == {"show_on_all_tabs": True}
+        assert not any(arg.startswith(("--lang=", "--remote-debugging", "--enable-automation")) for arg in command)
+
+
 def test_gpu_only_for_non_cloakbrowser(monkeypatch):
     monkeypatch.setattr(Path, "glob", lambda *_: [Path("/dev/dri/renderD128")])
     monkeypatch.setattr(engines.os, "access", lambda *_: True)
